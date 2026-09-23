@@ -1,0 +1,2779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<title>Gantt Chart Planner</title>
+<!--
+==============================================================================
+  Gantt Chart Planner — version 2.0
+  Author: Matej Barukčić, 2026. For personal use.
+
+  WHAT THIS IS
+    A single, self-contained HTML file that works as a small Gantt chart
+    editor (a focused subset of Microsoft Project). It runs completely
+    offline: no installation, no admin rights, no server, no external
+    libraries, no fonts to download, no tracking. Double-click to open.
+
+  HOW DATA IS STORED
+    Nothing is stored in the browser (no localStorage, no cookies). The
+    project only lives in memory while this page is open. Use
+    Menu -> "Save project (JSON)" (Ctrl+S) to download a .json file and
+    Menu -> "Open project" to load it again. The browser warns before the
+    page is closed while there are unsaved changes.
+
+  CODE ORGANISATION
+    Every functional area has its own <script> block. Classic scripts share
+    one global scope, so functions and top-level variables declared in an
+    earlier block are visible in later blocks. Order matters:
+      1. core-utils      date maths, escaping, file download helpers
+      1b. core-holidays  offline public holiday calendars (Slovenia, USA)
+      2. core-model      project state, sample data, undo/redo
+      3. core-scheduler  dependency maths, cycle detection, auto-scheduling
+      4. io              JSON import + validation, JSON/CSV/MS Project XML export
+      5. ui-dialogs      modal dialogs (message, task, phase, help, welcome)
+      6. ui-render       table + timeline (SVG) rendering
+      7. ui-print        A4-landscape print layout split across several pages
+      8. ui-events       toolbar, keyboard shortcuts, start-up
+
+  PROJECT FILE FORMAT (JSON, version "1.1"; files of version 1.0 still open)
+    {
+      "version": "1.1",                 required, major version must be 1
+      "holidays": { "countries": ["SI"], "off": ["SI:2026-12-26"] },
+                                        shown public holidays (SI Slovenia, US United
+                                        States) and the ones switched off, per date
+      "app": "Gantt Chart Planner",     informative
+      "name": "My Project",             project name (also the page title)
+      "exported": "2026-09-23",         informative (date of export)
+      "phases": [
+        { "id": "p1", "name": "Planning", "collapsed": false,
+          "tasks": [
+            { "id": "t1", "name": "Kick-off", "milestone": true,
+              "start": "2026-09-21",   ISO date YYYY-MM-DD
+              "duration": 0,           whole calendar days (>= 1 for tasks, 0 for milestones)
+              "percent": 0,            0..100, whole numbers (tasks only)
+              "done": true,            milestone reached? (milestones only)
+              "person": "",            owner (free text)
+              "note": "",              max. 200 characters
+              "deps": [ { "pred": "t0", "type": "FS", "lag": 0 } ],
+              "snet": "2026-10-01"     optional "Start No Earlier Than" of a linked task
+            } ] } ] }
+    Dependency types: FS finish-to-start, SS start-to-start,
+    FF finish-to-finish, SF start-to-finish. "lag" is in calendar days,
+    negative values are a lead.
+==============================================================================
+-->
+<style>
+/* =============================================================================
+   DESIGN TOKENS
+   A single fixed light theme (decision: light only). Colours used by the
+   timeline are defined here so screen and print share them.
+   ========================================================================== */
+:root {
+  --bg: #ffffff;          /* page and cell background */
+  --fg: #1f2328;          /* main text */
+  --muted: #5f6b7a;       /* secondary text */
+  --line: #d9dee4;        /* borders of controls */
+  --grid: #eceff3;        /* thin grid lines / row separators */
+  --grid-strong: #c9d0d8; /* week (or month) separators */
+  --head: #f5f7f9;        /* header / toolbar background */
+  --phase-bg: #f7f8fa;    /* phase row background */
+  --sel: #e6effa;         /* selected row */
+  --hover: #f8fafc;       /* hovered row */
+  --accent: #0b5cad;      /* primary buttons, links, focus ring */
+  --danger: #b42318;      /* destructive actions */
+  --task: #a9b5c6;        /* task bar (all tasks share one colour) */
+  --task-prog: #3e5068;   /* completed part of a task bar */
+  --ms: #1f2328;          /* milestone outline / fill when reached */
+  --rh: 32px;             /* row height (desktop: compact) */
+  --fs: 13px;             /* base font size */
+  --btn: 32px;            /* minimum size of buttons */
+}
+/* Touch devices: at least 44x44 px touch targets and 16 px text
+   (iOS Safari zooms into inputs with smaller text). */
+@media (pointer: coarse) {
+  :root { --rh: 45px; --fs: 16px; --btn: 44px; }
+}
+
+/* =============================================================================
+   BASE
+   ========================================================================== */
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+  font: var(--fs)/1.35 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+[hidden] { display: none !important; }
+button { font: inherit; color: var(--fg); background: #fff; border: 1px solid var(--line);
+  border-radius: 6px; min-height: var(--btn); min-width: var(--btn); padding: 0 10px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
+button:hover { background: var(--hover); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { background: #094c90; }
+button.danger { color: var(--danger); border-color: #efc7c2; }
+input, select, textarea { font: inherit; color: var(--fg); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+kbd { font: .85em ui-monospace, SFMono-Regular, Consolas, monospace; border: 1px solid var(--line);
+  border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: #fff; }
+
+/* =============================================================================
+   APP LAYOUT: toolbar on top, scrollable sheet below (fills the screen)
+   ========================================================================== */
+#app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+#toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 8px;
+  padding-left: max(8px, env(safe-area-inset-left)); padding-right: max(8px, env(safe-area-inset-right));
+  background: var(--head); border-bottom: 1px solid var(--line); flex: none; }
+#projName { flex: 1 1 170px; min-width: 0; min-height: var(--btn); font-weight: 650; font-size: 1.08em;
+  border: 1px solid transparent; background: transparent; border-radius: 6px; padding: 0 8px; }
+#projName:hover { border-color: var(--line); }
+#projName:focus { border-color: var(--accent); background: #fff; outline: none; }
+.tb { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+#search { flex: 1 1 110px; min-width: 0; min-height: var(--btn); border: 1px solid var(--line);
+  border-radius: 6px; padding: 0 8px; background: #fff; }
+#zoom { min-height: var(--btn); border: 1px solid var(--line); border-radius: 6px; background: #fff; padding: 0 6px; }
+.menu { position: relative; }
+.menu > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  min-height: var(--btn); padding: 0 12px; border: 1px solid var(--line); border-radius: 6px;
+  background: #fff; user-select: none; -webkit-user-select: none; }
+.menu > summary::-webkit-details-marker { display: none; }
+.menu-pop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 30; background: #fff;
+  border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 28px rgba(15, 23, 42, .18);
+  padding: 4px; display: flex; flex-direction: column; min-width: 250px; max-width: calc(100vw - 16px); }
+.menu-pop button { border: none; justify-content: flex-start; text-align: left; border-radius: 6px; }
+.menu-pop button:hover { background: var(--sel); }
+.menu-pop hr { border: none; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
+/* On wide screens everything fits on one line: move the menu to the far right. */
+@media (min-width: 980px) { .menu { order: 10; } }
+
+/* =============================================================================
+   SHEET = table (left) + timeline (right) inside ONE scroll container.
+   Horizontal scrolling moves both; the "#" and "Name" columns are sticky.
+   ========================================================================== */
+#scroller { flex: 1 1 auto; min-height: 0; overflow: auto; position: relative; overscroll-behavior: contain; }
+#sheet { position: relative; }
+.hdr { position: sticky; top: 0; z-index: 5; display: flex; height: 44px; background: var(--head);
+  border-bottom: 1px solid var(--line); }
+.hdr .cell { background: var(--head); color: var(--muted); font-weight: 600; font-size: .85em; }
+.hdr .sticky { z-index: 6; }
+.tlh { flex: none; height: 44px; }
+.tlh svg { display: block; }
+.body { position: relative; }
+/* The timeline SVG lies on top of the (empty) timeline cells of the rows.
+   It ignores the mouse except on bars, so clicks on empty space select the row. */
+svg.tl { position: absolute; top: 0; z-index: 1; pointer-events: none; display: block; }
+svg.tl .bar { pointer-events: auto; cursor: pointer; }
+/* Row separators are drawn by each cell (and by the SVG for the timeline part), so the
+   sticky cells cover everything that scrolls underneath them, including separators. */
+.row { display: flex; height: var(--rh); }
+.cell { flex: none; display: flex; align-items: center; height: 100%; padding: 0 4px; background: var(--bg);
+  border-right: 1px solid var(--grid); border-bottom: 1px solid var(--grid); overflow: hidden; white-space: nowrap; }
+.cell.num { justify-content: flex-end; font-variant-numeric: tabular-nums; }
+.sticky { position: sticky; z-index: 3; }
+.c-name { border-right: 1px solid var(--line); }
+.tlc { flex: none; height: 100%; }
+.row:hover .cell { background: var(--hover); }
+.row.phase .cell { background: var(--phase-bg); font-weight: 600; }
+.row.sel .cell, .row.sel .tlc { background: var(--sel); }
+.row.task .c-name { padding-left: 30px; }
+@media (pointer: coarse) { .row.task .c-name { padding-left: 18px; } }
+.cell input:not([type=checkbox]) { width: 100%; min-width: 0; height: calc(100% - 6px); border: 1px solid transparent;
+  border-radius: 4px; background: transparent; padding: 0 4px; text-overflow: ellipsis; font-weight: inherit; }
+.cell input:not([type=checkbox]):hover { border-color: var(--line); }
+.cell input:not([type=checkbox]):focus { border-color: var(--accent); background: #fff; outline: none; text-overflow: clip; }
+.cell input[readonly] { color: var(--muted); cursor: default; }
+.cell input[readonly]:hover { border-color: transparent; }
+.cell.num input { text-align: right; }
+.cell button { min-height: 0; min-width: 0; height: 100%; border: none; border-radius: 0; background: transparent; padding: 0; }
+.c-act { padding: 0; }
+.c-act button { width: var(--btn); flex: none; color: var(--muted); font-size: 1.05em; }
+.c-act button:hover { background: var(--sel); color: var(--fg); }
+.idbtn { width: 100%; justify-content: flex-start !important; padding: 0 6px !important; color: var(--accent) !important;
+  font-variant-numeric: tabular-nums; font-weight: inherit; }
+.tog { width: 26px; flex: none; color: var(--muted) !important; }
+@media (pointer: coarse) { .tog { width: 40px; } }
+.predbtn { width: 100%; justify-content: flex-start !important; padding: 0 6px !important; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; display: block !important; text-align: left; }
+.predbtn.none { color: var(--muted) !important; }
+.cbx { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; cursor: pointer; }
+.cbx input { width: 18px; height: 18px; margin: 0; }
+.muted { color: var(--muted); }
+.empty { position: sticky; left: 0; padding: 28px 16px; color: var(--muted); max-width: min(560px, 100vw); white-space: normal; }
+
+/* Timeline graphics (inline SVG uses these classes on screen and in print). */
+.g1 { stroke: var(--grid); stroke-width: 1; fill: none; }
+.g2 { stroke: var(--grid-strong); stroke-width: 1; fill: none; }
+.th-l { stroke: var(--line); stroke-width: 1; }
+.th-t { font-size: 11px; fill: var(--muted); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.th-b { font-weight: 700; fill: var(--fg); }
+.bar-bg { fill: var(--task); }
+.bar-pg { fill: var(--task-prog); }
+.bar:hover .bar-bg { fill: #93a2b7; }
+.ms-c { stroke: var(--ms); stroke-width: 3; }
+.ms-open { fill: #fff; }
+.ms-done { fill: var(--ms); }
+.arrow { stroke: #4b5563; stroke-width: 1.25; fill: none; }
+/* Alternating very light columns (days in week view, weeks in month view). */
+.zb { fill: #000; fill-opacity: .022; }
+/* Public holidays: light vermilion column; the day number in the header is red. */
+.hol { fill: #D55E00; fill-opacity: .10; }
+.th-hol { fill: var(--danger); font-weight: 700; }
+/* Drag-to-link (mouse only): handles appear on the ends of a hovered bar. */
+.hdl { fill: #fff; stroke: var(--accent); stroke-width: 2; opacity: 0; pointer-events: none; }
+.ahd { fill: transparent; pointer-events: none; }
+svg.tl .arrow-hit { stroke: transparent; stroke-width: 10; fill: none; pointer-events: stroke; cursor: pointer; }
+@media (pointer: fine) {
+  svg.tl .hdl.show { opacity: 1; pointer-events: auto; cursor: crosshair; }
+  svg.tl .ahd { pointer-events: auto; cursor: grab; }
+}
+.dragline { stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 4 3; fill: none; pointer-events: none; }
+svg.tl .bar.drop .bar-bg { stroke: var(--accent); stroke-width: 2.5; }
+svg.tl .bar.nodrop .bar-bg { stroke: var(--danger); stroke-width: 2.5; }
+/* A linked task with a "start no earlier than" constraint: orange mark on its start field. */
+.cell input.snet { box-shadow: inset 3px 0 0 #E69F00; }
+
+/* =============================================================================
+   DIALOGS (native <dialog>, always modal)
+   ========================================================================== */
+dialog.dlg { border: none; border-radius: 10px; padding: 16px; width: min(580px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow: auto; color: var(--fg);
+  box-shadow: 0 12px 40px rgba(15, 23, 42, .28); }
+dialog::backdrop { background: rgba(15, 23, 42, .45); }
+.dlg h2 { margin: 0 0 12px; font-size: 1.15em; }
+.dlg h3 { margin: 14px 0 6px; font-size: 1em; }
+.dlg p { margin: 0 0 10px; }
+.dlg label { display: flex; flex-direction: column; gap: 3px; font-size: .9em; color: var(--muted); margin-bottom: 10px; min-width: 0; }
+.dlg input:not([type=checkbox]), .dlg select, .dlg textarea { font-size: var(--fs); padding: 5px 8px; border: 1px solid var(--line);
+  border-radius: 6px; min-height: var(--btn); background: #fff; width: 100%; min-width: 0; }
+.dlg input:not([type=checkbox]):focus, .dlg select:focus, .dlg textarea:focus { border-color: var(--accent); outline: none; }
+.dlg input[readonly] { background: var(--head); color: var(--muted); }
+.dlg textarea { resize: vertical; min-height: 64px; }
+.dlg label.chk { flex-direction: row; align-items: center; gap: 8px; min-height: var(--btn); align-self: end; color: var(--fg); cursor: pointer; }
+.dlg label.chk input { width: 20px; height: 20px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0 10px; }
+@media (max-width: 520px) { .grid3 { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 360px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+.btns { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.btns .spacer { flex: 1; }
+.hint { font-size: .85em; color: var(--muted); margin: -4px 0 10px; }
+.datebox { display: flex; gap: 4px; }
+.datebox .dtxt { flex: 1; }
+.pick { position: relative; flex: none; width: var(--btn); min-height: var(--btn); display: flex; align-items: center;
+  justify-content: center; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); overflow: hidden; cursor: pointer; background: #fff; }
+.dlg .pick-in { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; min-height: 0; padding: 0;
+  margin: 0; border: none; cursor: pointer; }
+.pick.off { opacity: .4; pointer-events: none; }
+fieldset.deps { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px 4px; margin: 0 0 6px; min-width: 0; }
+fieldset.deps legend { font-size: .9em; color: var(--muted); padding: 0 4px; }
+.deprow { display: grid; grid-template-columns: minmax(0, 1fr) 72px 76px var(--btn); gap: 6px; margin-bottom: 6px; align-items: center; }
+.deprow button { padding: 0; }
+.errs { margin: 0 0 10px; padding-left: 22px; max-height: 45vh; overflow: auto; }
+.errs li { margin-bottom: 4px; }
+.errs code, pre { font: .85em ui-monospace, SFMono-Regular, Consolas, monospace; }
+pre { background: var(--head); padding: 6px 8px; border-radius: 6px; overflow: auto; margin: 4px 0 10px; }
+.help ul { margin: 0 0 8px; padding-left: 20px; }
+.help li { margin-bottom: 5px; }
+table.keys { border-collapse: collapse; margin-bottom: 8px; }
+table.keys td { padding: 3px 12px 3px 0; vertical-align: top; }
+details.ex { margin: 4px 0 8px; }
+details.ex > summary { cursor: pointer; color: var(--accent); font-size: .88em; }
+dl.ex { margin: 6px 0 0; font-size: .88em; }
+dl.ex dt { font-weight: 650; margin-top: 6px; color: var(--fg); }
+dl.ex dd { margin: 1px 0 0 0; color: var(--muted); }
+.holi { max-height: 48vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; margin-bottom: 8px; }
+.holi h4 { margin: 8px 0 4px; font-size: .95em; }
+.holi label.hr { flex-direction: row; align-items: center; gap: 8px; margin: 0; min-height: var(--btn); color: var(--fg); font-size: .92em; }
+.holi label.hr input { width: 18px; height: 18px; flex: none; }
+.holi .hd { font-variant-numeric: tabular-nums; min-width: 92px; }
+.holi .wd { color: var(--muted); min-width: 30px; }
+
+/* =============================================================================
+   PRINT (A4 landscape, several pages when the chart is wide or long).
+   The printable pages are generated by JavaScript into #printArea just
+   before printing; the interactive app is hidden on paper.
+   ========================================================================== */
+#printArea { display: none; }
+.page { width: 1046px; height: 716px; overflow: hidden; display: flex; flex-direction: column; background: #fff;
+  font: 10px/1.2 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #111;
+  break-after: page; page-break-after: always; }
+.page:last-child { break-after: auto; page-break-after: auto; }
+.ph { display: flex; justify-content: space-between; align-items: center; gap: 12px; height: 30px; flex: none;
+  border-bottom: 1.5px solid #333; font-size: 12px; }
+.pb { display: flex; flex: none; }
+.pl { flex: none; border-right: 1px solid #bbb; }
+.prw { display: flex; border-bottom: 1px solid #e6e8eb; }
+.prw > div { padding: 0 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; line-height: 21px; border-right: 1px solid #eef0f2; flex: none; }
+.prw.hd > div { font-weight: 700; line-height: 20px; padding-top: 4px; }
+.prw.phase { font-weight: 700; background: #f3f4f6; }
+.pt svg { display: block; }
+.pf { margin-top: auto; height: 20px; flex: none; font-size: 9px; color: #444; border-top: 1px solid #ccc; display: flex; align-items: center; }
+@media print {
+  @page { size: A4 landscape; margin: 10mm; }
+  html, body { height: auto !important; overflow: visible !important; background: #fff; }
+  #app, dialog { display: none !important; }
+  #printArea { display: block !important; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <header id="toolbar">
+    <input id="projName" aria-label="Project name" title="Project name (also used as the file name)" autocomplete="off">
+    <details class="menu" id="menu">
+      <summary aria-label="Menu">&#9776; Menu</summary>
+      <div class="menu-pop" role="menu">
+        <button data-act="open" role="menuitem">Open project (JSON)&hellip;</button>
+        <button data-act="save" role="menuitem">Save project (JSON) &nbsp;<span class="muted">Ctrl+S</span></button>
+        <hr>
+        <button data-act="csv" role="menuitem">Export CSV (Excel)</button>
+        <button data-act="xml" role="menuitem">Export MS Project XML</button>
+        <button data-act="print" role="menuitem">Print / PDF (A4 landscape)</button>
+        <hr>
+        <button data-act="holidays" role="menuitem">Public holidays&hellip;</button>
+        <hr>
+        <button data-act="new" role="menuitem">New empty project</button>
+        <button data-act="help" role="menuitem">Help &amp; shortcuts</button>
+      </div>
+    </details>
+    <div class="tb">
+      <button id="bAddPhase" title="Add a phase">+ Phase</button>
+      <button id="bAddTask" title="Add a task (Alt+N)">+ Task</button>
+    </div>
+    <div class="tb">
+      <button id="bUndo" title="Undo (Ctrl+Z)" aria-label="Undo">&#8630;</button>
+      <button id="bRedo" title="Redo (Ctrl+Y)" aria-label="Redo">&#8631;</button>
+    </div>
+    <div class="tb">
+      <select id="zoom" aria-label="Timeline zoom" title="Timeline zoom">
+        <option value="week">Week</option>
+        <option value="month">Month</option>
+      </select>
+      <button id="bToday" title="Scroll the timeline to today">Today</button>
+    </div>
+    <input id="search" type="search" placeholder="Search tasks&hellip;" aria-label="Search tasks by name" autocomplete="off">
+  </header>
+  <main id="scroller"><div id="sheet"></div></main>
+</div>
+<div id="printArea" aria-hidden="true"></div>
+<!-- Hidden file picker used by "Open project". Kept off-screen instead of
+     display:none, because some mobile browsers refuse to open hidden pickers. -->
+<input type="file" id="fileInput" accept=".json,application/json" style="position:fixed;left:-9999px;top:0;opacity:0" tabindex="-1" aria-hidden="true">
+
+<!-- ======================================================================
+     1. CORE UTILITIES
+     ====================================================================== -->
+<script id="core-utils">
+'use strict';
+/*
+ * Dates are handled as whole "day numbers": the number of days since
+ * 1970-01-01, computed in UTC. Time of day and time zones are ignored on
+ * purpose (decision: one time zone, no special handling), so a task that
+ * starts on 23.09.2026 starts on that calendar day on every device.
+ */
+
+/** Milliseconds in one day. */
+const DAY_MS = 86400000;
+
+/** Short English month names for the timeline header. */
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * 'YYYY-MM-DD' (the format inside the JSON file) -> day number.
+ * Returns NaN for anything that is not a real calendar date (e.g. 2026-02-30).
+ */
+function isoToDay(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(typeof iso === 'string' ? iso : '');
+  if (!m) return NaN;
+  const y = +m[1], mo = +m[2], d = +m[3];
+  const t = Date.UTC(y, mo - 1, d);
+  const dt = new Date(t);
+  // Date.UTC silently rolls invalid dates over (31.02 -> 03.03); reject those.
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return NaN;
+  return Math.round(t / DAY_MS);
+}
+
+/** Day number -> 'YYYY-MM-DD'. */
+function dayToIso(n) { return new Date(n * DAY_MS).toISOString().slice(0, 10); }
+
+/** Day number -> 'DD.MM.YYYY' (the display format everywhere in the UI). */
+function dayToDisp(n) {
+  const s = dayToIso(n);
+  return `${s.slice(8, 10)}.${s.slice(5, 7)}.${s.slice(0, 4)}`;
+}
+
+/**
+ * User text -> day number. Accepts 'DD.MM.YYYY' and forgiving variants such
+ * as '3.9.2026', '03/09/2026', '03-09-2026' or '3. 9. 2026'. NaN when invalid.
+ */
+function dispToDay(txt) {
+  const m = /^\s*(\d{1,2})\s*[.\/-]\s*(\d{1,2})\s*[.\/-]\s*(\d{4})\s*\.?\s*$/.exec(String(txt ?? ''));
+  if (!m) return NaN;
+  return isoToDay(`${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`);
+}
+
+/** Today's local calendar date as a day number. */
+function todayDay() {
+  const d = new Date();
+  return Math.round(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / DAY_MS);
+}
+
+/**
+ * Weekday index with Monday = 0 ... Sunday = 6 (decision: weeks start on
+ * Monday). Day 0 (1970-01-01) was a Thursday, hence the +3.
+ */
+function mondayIndex(n) { return (((n + 3) % 7) + 7) % 7; }
+
+/** Day number -> {y, m (0-11), d (1-31)}. */
+function dayParts(n) {
+  const d = new Date(n * DAY_MS);
+  return { y: d.getUTCFullYear(), m: d.getUTCMonth(), d: d.getUTCDate() };
+}
+
+/** First day of the month containing day n, shifted by k months. */
+function firstOfMonth(n, k = 0) {
+  const p = dayParts(n);
+  return Math.round(Date.UTC(p.y, p.m + k, 1) / DAY_MS);
+}
+
+/** First day of the year containing day n, shifted by k years. */
+function firstOfYear(n, k = 0) {
+  return Math.round(Date.UTC(dayParts(n).y + k, 0, 1) / DAY_MS);
+}
+
+/** Escapes text for safe use inside HTML/SVG/XML markup and attributes. */
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/** Rounds v to an integer and clamps it to [min, max]; fallback when not a number. */
+function clampInt(v, min, max, fallback) {
+  if (v === '' || v === null || v === undefined) return fallback;
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+/** Turns a project name into something usable as a file name. */
+function safeFileName(name) {
+  const s = String(name || '').trim()
+    .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '-')
+    .replace(/\s+/g, '_')
+    .slice(0, 80);
+  return s || 'project';
+}
+
+/**
+ * Offers text as a file download. Works from file:// in Chromium/Edge and
+ * in Safari on iOS (the file lands in "Downloads"/"Files").
+ */
+function download(filename, text, mime) {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
+}
+
+/** Tiny DOM helpers. */
+function $(sel, root = document) { return root.querySelector(sel); }
+function $$(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
+</script>
+
+<!-- ======================================================================
+     1b. CORE HOLIDAYS: offline public-holiday calendars
+     ====================================================================== -->
+<script id="core-holidays">
+'use strict';
+/*
+ * Public holidays are CALCULATED, not downloaded, so they work offline for
+ * any year. They are only SHOWN on the timeline (decision): durations stay
+ * in calendar days.
+ *
+ * Slovenia – work-free days (dela prosti dnevi) according to the Zakon o
+ * praznikih in dela prostih dnevih v RS (ZPDPD). Holidays that are NOT
+ * work-free (e.g. 8 June, 17 August, 23 November) are not included.
+ * A holiday on a Sunday is not moved to Monday.
+ *
+ * USA – the 11 federal holidays (5 U.S.C. 6103, as listed by OPM). A holiday
+ * on a Saturday is observed on the Friday before, on a Sunday on the Monday
+ * after; the OBSERVED day (the day off) is shown.
+ *
+ * Checked against official sources in September 2026. Laws can change –
+ * single holidays can be switched off per year in Menu → Public holidays.
+ */
+
+/** Countries offered in the holidays dialog. */
+const HOLIDAY_COUNTRIES = { SI: 'Slovenia', US: 'United States' };
+/** Short weekday names (Monday first). */
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+/** Day number of a calendar date (month 1-12). Day 0 of a month = last day of the previous month. */
+function ymd(y, m, d) { return Math.round(Date.UTC(y, m - 1, d) / DAY_MS); }
+
+/** Easter Sunday (Gregorian calendar, "anonymous Gregorian algorithm"). */
+function easterSunday(y) {
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4;
+  const f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31), day = ((h + l - 7 * m + 114) % 31) + 1;
+  return ymd(y, month, day);
+}
+
+/** n-th weekday (0 = Monday) of a month, e.g. 3rd Monday of January. */
+function nthWeekday(y, m, wd, n) {
+  const first = ymd(y, m, 1);
+  return first + ((wd - mondayIndex(first) + 7) % 7) + 7 * (n - 1);
+}
+
+/** Last weekday (0 = Monday) of a month, e.g. last Monday of May. */
+function lastWeekday(y, m, wd) {
+  const last = ymd(y, m + 1, 0);
+  return last - ((mondayIndex(last) - wd + 7) % 7);
+}
+
+/** Holidays of one country in one year: [{ day, name, key }], sorted by date. */
+function holidaysForYear(cc, y) {
+  const list = [];
+  const add = (day, name) => list.push({ day, name, key: `${cc}:${dayToIso(day)}` });
+  if (cc === 'SI') {
+    const e = easterSunday(y);
+    add(ymd(y, 1, 1), 'New Year (novo leto)');
+    add(ymd(y, 1, 2), 'New Year, 2nd day (novo leto)');
+    add(ymd(y, 2, 8), 'Prešeren Day (Prešernov dan)');
+    add(e, 'Easter Sunday (velikonočna nedelja)');
+    add(e + 1, 'Easter Monday (velikonočni ponedeljek)');
+    add(ymd(y, 4, 27), 'Day of Uprising Against Occupation (dan upora proti okupatorju)');
+    add(ymd(y, 5, 1), 'Labour Day (praznik dela)');
+    add(ymd(y, 5, 2), 'Labour Day, 2nd day (praznik dela)');
+    add(e + 49, 'Whit Sunday (binkoštna nedelja)');
+    add(ymd(y, 6, 25), 'Statehood Day (dan državnosti)');
+    add(ymd(y, 8, 15), 'Assumption Day (Marijino vnebovzetje)');
+    add(ymd(y, 10, 31), 'Reformation Day (dan reformacije)');
+    add(ymd(y, 11, 1), 'Remembrance Day (dan spomina na mrtve)');
+    add(ymd(y, 12, 25), 'Christmas (božič)');
+    add(ymd(y, 12, 26), 'Independence and Unity Day (dan samostojnosti in enotnosti)');
+  } else if (cc === 'US') {
+    // Fixed-date holidays move to the nearest weekday; they are computed for
+    // this and the next year because 1 January may be observed on 31 December.
+    for (const yy of [y, y + 1]) {
+      const fixed = [[ymd(yy, 1, 1), "New Year's Day"], [ymd(yy, 6, 19), 'Juneteenth National Independence Day'],
+        [ymd(yy, 7, 4), 'Independence Day'], [ymd(yy, 11, 11), 'Veterans Day'], [ymd(yy, 12, 25), 'Christmas Day']];
+      for (const [day, name] of fixed) {
+        const wd = mondayIndex(day);
+        const obs = wd === 5 ? day - 1 : wd === 6 ? day + 1 : day;
+        if (dayParts(obs).y === y) add(obs, obs === day ? name : `${name} (observed)`);
+      }
+    }
+    add(nthWeekday(y, 1, 0, 3), 'Birthday of Martin Luther King, Jr.');
+    add(nthWeekday(y, 2, 0, 3), "Washington's Birthday");
+    add(lastWeekday(y, 5, 0), 'Memorial Day');
+    add(nthWeekday(y, 9, 0, 1), 'Labor Day');
+    add(nthWeekday(y, 10, 0, 2), 'Columbus Day');
+    add(nthWeekday(y, 11, 3, 4), 'Thanksgiving Day');
+  }
+  return list.sort((a, b) => a.day - b.day);
+}
+
+/** Default holiday settings of a new project: Slovenia on, USA available. */
+function defaultHolidays() { return { countries: ['SI'], off: [] }; }
+
+/**
+ * Holidays to draw between two days: Map day -> ['SI: Christmas (božič)', ...].
+ * Only countries switched on and holidays not switched off are included.
+ */
+function holidayIndex(from, to) {
+  const h = state.holidays || defaultHolidays();
+  const off = new Set(h.off || []);
+  const map = new Map();
+  for (const cc of h.countries || []) {
+    for (let y = dayParts(from).y; y <= dayParts(to).y; y++) {
+      for (const x of holidaysForYear(cc, y)) {
+        if (x.day < from || x.day > to || off.has(x.key)) continue;
+        if (!map.has(x.day)) map.set(x.day, []);
+        map.get(x.day).push(`${cc}: ${x.name}`);
+      }
+    }
+  }
+  return map;
+}
+</script>
+
+<!-- ======================================================================
+     2. CORE MODEL: state, sample data, undo/redo
+     ====================================================================== -->
+<script id="core-model">
+'use strict';
+
+/** Version written into every saved file. Files with a different MAJOR version are refused. */
+const FILE_VERSION = '1.1';
+/** Undo depth (decision: 10 steps; an import counts as one step). */
+const UNDO_LIMIT = 10;
+/** Above this many tasks a one-time, soft performance hint is shown (no hard limit). */
+const LARGE_PROJECT = 100;
+/** Maximum length of a task note. */
+const NOTE_MAX = 200;
+/** Supported dependency types. */
+const DEP_TYPES = ['FS', 'SS', 'FF', 'SF'];
+/**
+ * Okabe-Ito palette: distinguishable for the common types of colour
+ * blindness. Phases get these colours in order; with more phases than
+ * colours the palette repeats (decision: recycle).
+ */
+const PALETTE = ['#0072B2', '#E69F00', '#009E73', '#CC79A7', '#56B4E9', '#D55E00', '#F0E442'];
+
+/**
+ * The whole project. Shape: { name, phases: [ { id, name, collapsed, tasks: [task] } ] }
+ * task: { id, name, milestone, start 'YYYY-MM-DD', duration, percent, done, person, note, deps: [{pred, type, lag}] }
+ */
+let state = null;
+/** Undo/redo stacks hold JSON snapshots of `state`. */
+let undoStack = [];
+let redoStack = [];
+/** True when there are changes that have not been saved to a JSON file. */
+let dirty = false;
+/** The large-project hint is shown only once per session. */
+let warnedLarge = false;
+/** View state that is NOT part of the project file. */
+const ui = { zoom: 'week', filter: '', selected: null };
+/** Counter used to create unique ids such as 't12' or 'p3'. */
+let idCounter = 0;
+
+/** True if any phase or task already uses this id. */
+function idExists(id) {
+  for (const p of state?.phases || []) {
+    if (p.id === id) return true;
+    for (const t of p.tasks) if (t.id === id) return true;
+  }
+  return false;
+}
+
+/** Creates a new unique id with the given prefix ('t' task, 'p' phase). */
+function newId(prefix) {
+  let id;
+  do { id = prefix + (++idCounter); } while (idExists(id));
+  return id;
+}
+
+/** After loading a file, make sure new ids continue after the highest existing number. */
+function syncIdCounter() {
+  const bump = (id) => { const m = /(\d+)$/.exec(id); if (m) idCounter = Math.max(idCounter, Number(m[1])); };
+  for (const p of state.phases) { bump(p.id); for (const t of p.tasks) bump(t.id); }
+}
+
+/** Factory for a task with sensible defaults (starts today, 5 days). */
+function makeTask(o = {}) {
+  return { id: newId('t'), name: 'New task', milestone: false, start: dayToIso(todayDay()), duration: 5,
+    percent: 0, done: false, person: '', note: '', deps: [], ...o };
+}
+
+/** Factory for an empty phase. */
+function makePhase(o = {}) {
+  return { id: newId('p'), name: 'New phase', collapsed: false, tasks: [], ...o };
+}
+
+/** All tasks of all phases in display order. */
+function allTasks() { return state.phases.flatMap((p) => p.tasks); }
+
+/** Locates a task: { phase, index, task } or null. */
+function findTask(id) {
+  for (const p of state.phases) {
+    const i = p.tasks.findIndex((t) => t.id === id);
+    if (i >= 0) return { phase: p, index: i, task: p.tasks[i] };
+  }
+  return null;
+}
+
+/** Locates a phase: { phase, index } or null. */
+function findPhase(id) {
+  const i = state.phases.findIndex((p) => p.id === id);
+  return i >= 0 ? { phase: state.phases[i], index: i } : null;
+}
+
+/**
+ * Hierarchical numbers derived from the current order (decision: 1, 1.1, 1.2, 2, 2.1 ...).
+ * They are recomputed on every render, so moving/deleting rows renumbers automatically.
+ */
+function numbering() {
+  const m = new Map();
+  state.phases.forEach((p, i) => {
+    m.set(p.id, String(i + 1));
+    p.tasks.forEach((t, j) => m.set(t.id, `${i + 1}.${j + 1}`));
+  });
+  return m;
+}
+
+/** Last day (inclusive) of a task; for a milestone the milestone date itself. */
+function taskEndDay(t) {
+  const s = isoToDay(t.start);
+  return t.milestone ? s : s + t.duration - 1;
+}
+
+/**
+ * Summary of a phase computed from its tasks: first start, last end, span in
+ * days and % complete weighted by task duration. null for an empty phase.
+ */
+function phaseSummary(p) {
+  if (!p.tasks.length) return null;
+  let s = Infinity, e = -Infinity, w = 0, done = 0;
+  for (const t of p.tasks) {
+    s = Math.min(s, isoToDay(t.start));
+    e = Math.max(e, taskEndDay(t));
+    if (!t.milestone) { w += t.duration; done += t.duration * t.percent; }
+  }
+  return { start: s, end: e, duration: e - s + 1, percent: w ? Math.round(done / w) : 0 };
+}
+
+/** Colour of a phase (by its position; the palette repeats after 7 phases). */
+function phaseColor(p) { return PALETTE[Math.max(0, state.phases.indexOf(p)) % PALETTE.length]; }
+
+/** Number of dependency links in other tasks that point to task `id`. */
+function successorLinkCount(id) {
+  let n = 0;
+  for (const t of allTasks()) n += t.deps.filter((d) => d.pred === id).length;
+  return n;
+}
+
+/**
+ * Text such as "1.2, 2.1SS+3d, 1.4FF-1d" describing the predecessors of a task
+ * (MS Project notation: a plain number means finish-to-start without lag).
+ */
+function predText(t, num) {
+  return t.deps.map((d) => {
+    const lag = d.lag ? `${d.lag > 0 ? '+' : ''}${d.lag}d` : '';
+    return `${num.get(d.pred) ?? '?'}${d.type === 'FS' && !lag ? '' : d.type}${lag}`;
+  }).join(', ');
+}
+
+/**
+ * Example project shown at every start (the app has no memory between
+ * sessions). Dates are relative to today so the example is always current.
+ */
+function sampleProject(name) {
+  idCounter = 0;
+  state = { name: name || 'My Project', holidays: defaultHolidays(), phases: [] };   // newId() needs a state to check against
+  const base = todayDay() - mondayIndex(todayDay()) - 7;   // Monday of last week
+  const d = (n) => dayToIso(base + n);
+  const planning = makePhase({ name: 'Planning' });
+  const execution = makePhase({ name: 'Execution' });
+  const closing = makePhase({ name: 'Testing & handover' });
+  const kickoff = makeTask({ name: 'Kick-off meeting', milestone: true, start: d(0), duration: 0, done: true });
+  const req = makeTask({ name: 'Define requirements', start: d(0), duration: 5, percent: 100, person: 'Anna' });
+  const design = makeTask({ name: 'Design and review', start: d(5), duration: 6, percent: 50, person: 'Luka',
+    deps: [{ pred: req.id, type: 'FS', lag: 0 }] });
+  const order = makeTask({ name: 'Order equipment', start: d(13), duration: 10, percent: 10, person: 'Anna',
+    deps: [{ pred: design.id, type: 'FS', lag: 2 }] });
+  const install = makeTask({ name: 'Installation', start: d(18), duration: 8, person: 'Luka',
+    deps: [{ pred: order.id, type: 'SS', lag: 5 }] });
+  const docs = makeTask({ name: 'Write documentation', start: d(20), duration: 6, person: 'Maja',
+    deps: [{ pred: install.id, type: 'FF', lag: 0 }] });
+  const test = makeTask({ name: 'Testing', start: d(26), duration: 7, person: 'Maja',
+    deps: [{ pred: install.id, type: 'FS', lag: 0 }] });
+  const report = makeTask({ name: 'Final report', start: d(33), duration: 3, person: 'Anna',
+    deps: [{ pred: test.id, type: 'FS', lag: 0 }, { pred: docs.id, type: 'FS', lag: 0 }] });
+  const handover = makeTask({ name: 'Handover', milestone: true, start: d(38), duration: 0 });
+  planning.tasks.push(kickoff, req, design);
+  execution.tasks.push(order, install, docs);
+  closing.tasks.push(test, report, handover);
+  state.phases.push(planning, execution, closing);
+  return state;
+}
+
+/**
+ * Runs `mutator` as ONE undoable step: snapshot -> change -> auto-schedule ->
+ * store the snapshot if something really changed -> re-render.
+ * The mutator may return false to cancel (nothing is recorded).
+ */
+function commit(mutator) {
+  const before = JSON.stringify(state);
+  if (mutator() === false) return false;
+  schedule();
+  if (JSON.stringify(state) !== before) {
+    undoStack.push(before);
+    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+    redoStack = [];
+    dirty = true;
+    checkLarge();
+  }
+  requestRender();
+  return true;
+}
+
+/** Undo the last step (no confirmation dialog on purpose - it must be quick). */
+function undo() {
+  if (!undoStack.length) return;
+  redoStack.push(JSON.stringify(state));
+  state = JSON.parse(undoStack.pop());
+  afterHistoryJump();
+}
+
+/** Redo the last undone step. */
+function redo() {
+  if (!redoStack.length) return;
+  undoStack.push(JSON.stringify(state));
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  state = JSON.parse(redoStack.pop());
+  afterHistoryJump();
+}
+
+/** Common clean-up after undo/redo. */
+function afterHistoryJump() {
+  syncIdCounter();
+  schedule();
+  dirty = true;
+  if (ui.selected && !findTask(ui.selected) && !findPhase(ui.selected)) ui.selected = null;
+  requestRender();
+}
+
+/** Soft, one-time hint for big projects (decision: warn, never block). */
+function checkLarge() {
+  const n = allTasks().length;
+  if (n > LARGE_PROJECT && !warnedLarge) {
+    warnedLarge = true;
+    setTimeout(() => showMessage('Large project',
+      `<p>This project now has <b>${n}</b> tasks. The app is designed for roughly 20–${LARGE_PROJECT} tasks; ` +
+      `with more, editing and printing can become slower.</p><p>You can continue — this is only a hint and is shown once.</p>`), 0);
+  }
+}
+</script>
+
+<!-- ======================================================================
+     3. CORE SCHEDULER: dependencies, cycles, automatic scheduling
+     ====================================================================== -->
+<script id="core-scheduler">
+'use strict';
+/*
+ * Scheduling model
+ * ----------------
+ * A task occupies the days [start, start + duration - 1]. For the maths we
+ * use an EXCLUSIVE finish f = start + duration (the morning after the last
+ * day). With that, the four dependency types become simple inequalities for
+ * the successor's start s (lag in calendar days, negative = lead):
+ *
+ *   FS  successor starts after the predecessor finishes:   s >= f_pred + lag
+ *   SS  successor starts after the predecessor starts:     s >= s_pred + lag
+ *   FF  successor finishes after the predecessor finishes: s + dur >= f_pred + lag
+ *   SF  successor finishes after the predecessor starts:   s + dur >= s_pred + lag
+ *
+ * Tasks WITH predecessors are scheduled "as soon as possible" like in
+ * MS Project: their start is the largest of these limits, so they move
+ * later AND earlier when their predecessors move. Optionally such a task has
+ * a "Start No Earlier Than" date (snet): then its start is the later of the
+ * link result and that date (MS Project behaviour). Tasks WITHOUT
+ * predecessors keep the start date typed by the user. Milestones never
+ * take part in dependencies (decision).
+ */
+
+/** Earliest allowed start of the successor for one dependency link. */
+function depConstraint(dep, pred, succDuration) {
+  const ps = isoToDay(pred.start);
+  const pf = ps + pred.duration;
+  const lag = Number(dep.lag) || 0;
+  switch (dep.type) {
+    case 'SS': return ps + lag;
+    case 'FF': return pf + lag - succDuration;
+    case 'SF': return ps + lag - succDuration;
+    default: return pf + lag; // FS
+  }
+}
+
+/**
+ * Orders tasks so that every predecessor comes before its successors
+ * (depth-first search). If the links contain a loop, `cycle` is the list of
+ * task ids forming it, e.g. [A, B, A] meaning "A depends on B, B depends on A".
+ * `depsOf` lets callers test a hypothetical change without applying it.
+ */
+function topoOrder(tasks, depsOf = (t) => t.deps) {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const mark = new Map(); // undefined = not visited, 1 = on the current path, 2 = finished
+  const order = [];
+  const path = [];
+  let cycle = null;
+  function visit(t) {
+    if (cycle) return;
+    const m = mark.get(t.id);
+    if (m === 2) return;
+    if (m === 1) { cycle = path.slice(path.indexOf(t.id)).concat(t.id); return; }
+    mark.set(t.id, 1);
+    path.push(t.id);
+    for (const d of depsOf(t)) {
+      const p = byId.get(d.pred);
+      if (p) visit(p);
+      if (cycle) return;
+    }
+    path.pop();
+    mark.set(t.id, 2);
+    order.push(t);
+  }
+  for (const t of tasks) { visit(t); if (cycle) break; }
+  return { order, cycle };
+}
+
+/**
+ * Recomputes the start of every task that has predecessors. Runs after
+ * every change (see commit()). Returns the cycle if one exists (should never
+ * happen, because cycles are prevented on input and on import).
+ */
+function schedule() {
+  const tasks = allTasks();
+  const { order, cycle } = topoOrder(tasks);
+  if (cycle) return cycle;
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  for (const t of order) {
+    if (!t.deps.length && t.snet) delete t.snet;   // a constraint only makes sense on a linked task
+    if (t.milestone || !t.deps.length) continue;
+    let earliest = -Infinity;
+    for (const d of t.deps) {
+      const p = byId.get(d.pred);
+      if (p && !p.milestone) earliest = Math.max(earliest, depConstraint(d, p, t.duration));
+    }
+    // "Start No Earlier Than" (good practice as in MS Project): the task may not start before this date.
+    const snet = isoToDay(t.snet);
+    if (!isNaN(snet)) earliest = Math.max(earliest, snet);
+    if (earliest > -Infinity) t.start = dayToIso(earliest);
+  }
+  return null;
+}
+
+/**
+ * Ids of all tasks that depend on task `id`, directly or indirectly. Those
+ * tasks can never become predecessors of `id` (that would close a loop), so
+ * the task dialog simply does not offer them.
+ */
+function dependentsOf(id) {
+  const successors = new Map();
+  for (const t of allTasks()) {
+    for (const d of t.deps) {
+      if (!successors.has(d.pred)) successors.set(d.pred, []);
+      successors.get(d.pred).push(t.id);
+    }
+  }
+  const out = new Set();
+  const queue = [id];
+  while (queue.length) {
+    const x = queue.pop();
+    for (const y of successors.get(x) || []) if (!out.has(y)) { out.add(y); queue.push(y); }
+  }
+  return out;
+}
+</script>
+
+<!-- ======================================================================
+     4. IO: open (validate) and save/export (JSON, CSV, MS Project XML)
+     ====================================================================== -->
+<script id="io">
+'use strict';
+
+/**
+ * Checks a parsed JSON object and converts it into a clean project.
+ * Collects EVERY problem with its exact location (e.g.
+ * "phases[1].tasks[3].start") so a broken file can be fixed by hand
+ * (decision: detailed debug messages). Returns { errors: [{path, msg}], project }.
+ */
+function validateProject(obj) {
+  const errors = [];
+  const err = (path, msg) => errors.push({ path, msg });
+  const isInt = (v) => typeof v === 'number' && Number.isInteger(v);
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    err('(file)', 'the file must contain one JSON object { ... }');
+    return { errors };
+  }
+  if (typeof obj.version !== 'string') err('version', 'missing or not a text value (expected "1.0")');
+  else if (obj.version.split('.')[0] !== FILE_VERSION.split('.')[0]) err('version', `unsupported file version "${obj.version}" – this app reads version 1.x`);
+  if (obj.name !== undefined && typeof obj.name !== 'string') err('name', 'must be text');
+  if (!Array.isArray(obj.phases)) { err('phases', 'missing or not a list [ ... ]'); return { errors }; }
+
+  const ids = new Set();
+  const seen = [];   // [{ task, path }] for the second pass
+  const out = { name: typeof obj.name === 'string' && obj.name.trim() ? obj.name : 'Imported project', holidays: defaultHolidays(), phases: [] };
+  // Holiday settings (new in file version 1.1; older files get the default: Slovenia).
+  if (obj.holidays !== undefined) {
+    const h = obj.holidays;
+    if (!h || typeof h !== 'object' || Array.isArray(h)) err('holidays', 'must be an object { "countries": [...], "off": [...] }');
+    else {
+      if (!Array.isArray(h.countries) || h.countries.some((c) => !HOLIDAY_COUNTRIES[c])) err('holidays.countries', `must be a list of country codes: ${Object.keys(HOLIDAY_COUNTRIES).join(', ')}`);
+      else out.holidays.countries = [...new Set(h.countries)];
+      if (h.off !== undefined && (!Array.isArray(h.off) || h.off.some((k) => typeof k !== 'string'))) err('holidays.off', 'must be a list of texts such as "SI:2026-12-26"');
+      else out.holidays.off = [...new Set(h.off || [])];
+    }
+  }
+  const checkId = (v, path) => {
+    if (typeof v !== 'string' || !v) { err(path, 'missing or empty id (must be text, e.g. "t1")'); return false; }
+    if (ids.has(v)) { err(path, `duplicate id "${v}" – every phase and task needs its own id`); return false; }
+    ids.add(v); return true;
+  };
+
+  obj.phases.forEach((p, i) => {
+    const P = `phases[${i}]`;
+    if (!p || typeof p !== 'object' || Array.isArray(p)) { err(P, 'must be an object { ... }'); return; }
+    checkId(p.id, `${P}.id`);
+    if (typeof p.name !== 'string') err(`${P}.name`, 'missing or not text');
+    if (p.collapsed !== undefined && typeof p.collapsed !== 'boolean') err(`${P}.collapsed`, 'must be true or false');
+    if (!Array.isArray(p.tasks)) { err(`${P}.tasks`, 'missing or not a list [ ... ]'); return; }
+    const phase = { id: p.id, name: String(p.name ?? ''), collapsed: !!p.collapsed, tasks: [] };
+    p.tasks.forEach((t, j) => {
+      const T = `${P}.tasks[${j}]`;
+      if (!t || typeof t !== 'object' || Array.isArray(t)) { err(T, 'must be an object { ... }'); return; }
+      checkId(t.id, `${T}.id`);
+      if (typeof t.name !== 'string') err(`${T}.name`, 'missing or not text');
+      if (t.milestone !== undefined && typeof t.milestone !== 'boolean') err(`${T}.milestone`, 'must be true or false');
+      const ms = t.milestone === true;
+      if (isNaN(isoToDay(t.start))) err(`${T}.start`, `invalid date ${JSON.stringify(t.start)} – expected a real date as "YYYY-MM-DD", e.g. "2026-09-23"`);
+      if (!ms && !(isInt(t.duration) && t.duration >= 1)) err(`${T}.duration`, `must be a whole number of days ≥ 1 (found ${JSON.stringify(t.duration)})`);
+      if (t.percent !== undefined && !(isInt(t.percent) && t.percent >= 0 && t.percent <= 100)) err(`${T}.percent`, `must be a whole number 0–100 (found ${JSON.stringify(t.percent)})`);
+      if (t.done !== undefined && typeof t.done !== 'boolean') err(`${T}.done`, 'must be true or false');
+      if (t.person !== undefined && typeof t.person !== 'string') err(`${T}.person`, 'must be text');
+      if (t.note !== undefined && typeof t.note !== 'string') err(`${T}.note`, 'must be text');
+      else if (typeof t.note === 'string' && t.note.length > NOTE_MAX) err(`${T}.note`, `too long (${t.note.length} characters, maximum ${NOTE_MAX})`);
+      const deps = [];
+      if (t.deps !== undefined && !Array.isArray(t.deps)) err(`${T}.deps`, 'must be a list [ ... ]');
+      else (t.deps || []).forEach((d, k) => {
+        const D = `${T}.deps[${k}]`;
+        if (!d || typeof d !== 'object') { err(D, 'must be an object { "pred": ..., "type": ..., "lag": ... }'); return; }
+        if (typeof d.pred !== 'string' || !d.pred) err(`${D}.pred`, 'missing predecessor id');
+        if (!DEP_TYPES.includes(d.type)) err(`${D}.type`, `must be one of ${DEP_TYPES.join(', ')} (found ${JSON.stringify(d.type)})`);
+        if (d.lag !== undefined && !isInt(d.lag)) err(`${D}.lag`, `must be a whole number of days (found ${JSON.stringify(d.lag)})`);
+        deps.push({ pred: d.pred, type: d.type, lag: isInt(d.lag) ? d.lag : 0 });
+      });
+      if (ms && deps.length) err(`${T}.deps`, 'milestones cannot have dependencies');
+      if (t.snet !== undefined && isNaN(isoToDay(t.snet))) err(`${T}.snet`, `invalid date ${JSON.stringify(t.snet)} – expected "YYYY-MM-DD"`);
+      const task = {
+        id: t.id, name: String(t.name ?? ''), milestone: ms, start: t.start,
+        duration: ms ? 0 : t.duration, percent: ms ? 0 : (isInt(t.percent) ? t.percent : 0),
+        done: ms ? t.done === true : false, person: typeof t.person === 'string' ? t.person : '',
+        note: typeof t.note === 'string' ? t.note : '', deps,
+      };
+      if (!ms && deps.length && !isNaN(isoToDay(t.snet))) task.snet = t.snet;
+      phase.tasks.push(task);
+      seen.push({ task, path: T });
+    });
+    out.phases.push(phase);
+  });
+
+  // Second pass: links must point to existing, non-milestone, other tasks.
+  const byId = new Map(seen.map((x) => [x.task.id, x.task]));
+  for (const { task, path } of seen) {
+    const used = new Set();
+    task.deps.forEach((d, k) => {
+      const D = `${path}.deps[${k}].pred`;
+      if (typeof d.pred !== 'string' || !d.pred) return;
+      if (!byId.has(d.pred)) err(D, `unknown task id "${d.pred}"`);
+      else if (d.pred === task.id) err(D, 'a task cannot depend on itself');
+      else if (byId.get(d.pred).milestone) err(D, `"${d.pred}" is a milestone – milestones cannot be predecessors`);
+      if (used.has(d.pred)) err(D, `predecessor "${d.pred}" is listed twice`);
+      used.add(d.pred);
+    });
+  }
+  if (!errors.length) {
+    const { cycle } = topoOrder(seen.map((x) => x.task));
+    if (cycle) err('deps', `circular dependency: ${cycle.map((id) => `"${byId.get(id)?.name}" (${id})`).join(' depends on ')}`);
+  }
+  return { errors, project: errors.length ? null : out };
+}
+
+/**
+ * Finds the character position of the first JSON syntax error with a small
+ * strict JSON scanner. Needed because newer browsers no longer include the
+ * position in JSON.parse error messages. Returns -1 if no error is found.
+ */
+function findJsonErrorPos(text) {
+  let i = 0;
+  const n = text.length;
+  const ws = () => { while (i < n && ' \t\n\r'.includes(text[i])) i++; };
+  const fail = () => { throw i; };
+  function string() {
+    i++;                                     // opening quote
+    while (i < n) {
+      const ch = text[i];
+      if (ch === '"') { i++; return; }
+      if (ch === '\\') { i += 2; continue; }
+      if (ch < ' ') fail();                  // raw line breaks/tabs are not allowed inside strings
+      i++;
+    }
+    fail();
+  }
+  function value() {
+    ws();
+    const c = text[i];
+    if (c === '{') {
+      i++; ws();
+      if (text[i] === '}') { i++; return; }
+      for (;;) {
+        ws(); if (text[i] !== '"') fail(); string();
+        ws(); if (text[i] !== ':') fail(); i++;
+        value(); ws();
+        if (text[i] === ',') { i++; continue; }
+        if (text[i] === '}') { i++; return; }
+        fail();
+      }
+    }
+    if (c === '[') {
+      i++; ws();
+      if (text[i] === ']') { i++; return; }
+      for (;;) {
+        value(); ws();
+        if (text[i] === ',') { i++; continue; }
+        if (text[i] === ']') { i++; return; }
+        fail();
+      }
+    }
+    if (c === '"') { string(); return; }
+    const m = /^-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?/.exec(text.slice(i, i + 400));
+    if (m && m[0]) { i += m[0].length; return; }
+    for (const lit of ['true', 'false', 'null']) if (text.startsWith(lit, i)) { i += lit.length; return; }
+    fail();
+  }
+  try { value(); ws(); if (i < n) fail(); return -1; }
+  catch (p) { return typeof p === 'number' ? p : -1; }
+}
+
+/** Explains where a JSON syntax error is (line, column and the line itself). */
+function jsonErrorWhere(e, text) {
+  let pos = findJsonErrorPos(text);
+  const m = pos < 0 ? /position (\d+)/.exec(e.message) : null;
+  if (m) pos = Number(m[1]);
+  if (pos >= 0) {
+    const before = text.slice(0, pos);
+    const line = before.split('\n').length;
+    const col = pos - before.lastIndexOf('\n');
+    const src = (text.split('\n')[line - 1] || '').slice(0, 160);
+    return `<p>Line ${line}, column ${col}:</p><pre>${esc(src)}\n${' '.repeat(Math.max(0, Math.min(col - 1, 160)))}^</pre>`;
+  }
+  const m2 = /line (\d+) column (\d+)/.exec(e.message);
+  return m2 ? `<p>Line ${m2[1]}, column ${m2[2]}.</p>` : '';
+}
+
+/**
+ * Opens a project file chosen by the user. On ANY problem the current
+ * project stays untouched and a detailed report is shown. A successful
+ * import is one undo step, so it can be reverted with Ctrl+Z.
+ */
+async function importFile(file) {
+  let text;
+  try { text = await file.text(); }
+  catch (e) { showMessage('Could not read the file', `<p>${esc(file.name)}: ${esc(e.message)}</p><p>Your current project was not changed.</p>`); return; }
+  let obj;
+  text = text.replace(/^\uFEFF/, '');          // ignore a UTF-8 byte order mark
+  try { obj = JSON.parse(text); }
+  catch (e) {
+    showMessage('Not a valid JSON file',
+      `<p><b>${esc(file.name)}</b> could not be opened because it is not valid JSON. Your current project was not changed.</p>` +
+      `<p><b>Problem:</b> ${esc(e.message)}</p>${jsonErrorWhere(e, text)}`);
+    return;
+  }
+  const { errors, project } = validateProject(obj);
+  if (errors.length) {
+    const shown = errors.slice(0, 60);
+    showMessage('This file is not a valid project',
+      `<p><b>${esc(file.name)}</b> has ${errors.length} problem${errors.length > 1 ? 's' : ''}. Your current project was not changed.</p>` +
+      `<ol class="errs">${shown.map((x) => `<li><code>${esc(x.path)}</code> – ${esc(x.msg)}</li>`).join('')}</ol>` +
+      (errors.length > shown.length ? `<p>… and ${errors.length - shown.length} more.</p>` : ''));
+    return;
+  }
+  commit(() => { state = project; syncIdCounter(); ui.selected = null; ui.filter = ''; $('#search').value = ''; });
+  dirty = false;                       // the project now equals the file on disk
+  render();
+  const tasks = allTasks();
+  if (tasks.length) scrollToDay(Math.min(...tasks.map((t) => isoToDay(t.start))), false);
+  showMessage('Project opened',
+    `<p><b>${esc(file.name)}</b> – ${state.phases.length} phase(s), ${tasks.length} task(s).</p>` +
+    `<p class="hint">Opened by mistake? Undo (Ctrl+Z) brings the previous project back.</p>`);
+}
+
+/** Today's date as used in file names: YYYY-MM-DD. */
+function fileDate() { return dayToIso(todayDay()); }
+
+/** Saves the project as JSON (the app's own format). Clears the "unsaved" flag. */
+function exportJSON() {
+  const data = { version: FILE_VERSION, app: 'Gantt Chart Planner', name: state.name, exported: fileDate(),
+    holidays: state.holidays || defaultHolidays(), phases: state.phases };
+  const fn = `${safeFileName(state.name)}_${fileDate()}.json`;
+  download(fn, JSON.stringify(data, null, 2), 'application/json');
+  dirty = false;
+  showMessage('Project saved',
+    `<p>The project was downloaded as <b>${esc(fn)}</b>.</p>` +
+    `<p class="hint">Keep this file – it is the only copy of your project. Open it later with Menu → Open project.</p>`);
+}
+
+/** One CSV field: quoted when it contains the separator, quotes or line breaks. */
+function csvCell(v) {
+  const s = String(v ?? '');
+  return /[;"\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/**
+ * CSV for Excel. Semicolon as separator and a UTF-8 BOM, because Excel with
+ * Slovenian/European regional settings expects ";" and needs the BOM to show
+ * č/š/ž correctly. Outline numbers are written as ="1.2" so Excel does not
+ * turn them into dates.
+ */
+function exportCSV() {
+  const num = numbering();
+  const rows = [['ID', 'Type', 'Name', 'Start', 'End', 'Duration (days)', '% complete', 'Milestone reached', 'Owner', 'Predecessors', 'Start no earlier than', 'Note']];
+  const idCell = (n) => `="${n}"`;
+  for (const p of state.phases) {
+    const s = phaseSummary(p);
+    rows.push([idCell(num.get(p.id)), 'Phase', p.name, s ? dayToDisp(s.start) : '', s ? dayToDisp(s.end) : '', s ? s.duration : '', s ? s.percent : '', '', '', '', '', '']);
+    for (const t of p.tasks) {
+      const st = isoToDay(t.start);
+      rows.push([idCell(num.get(t.id)), t.milestone ? 'Milestone' : 'Task', t.name, dayToDisp(st), dayToDisp(taskEndDay(t)),
+        t.milestone ? 0 : t.duration, t.milestone ? '' : t.percent, t.milestone ? (t.done ? 'yes' : 'no') : '',
+        t.person, predText(t, num), t.snet ? dayToDisp(isoToDay(t.snet)) : '', t.note]);
+    }
+  }
+  const csv = '\uFEFF' + rows.map((r) => r.map(csvCell).join(';')).join('\r\n');
+  const fn = `${safeFileName(state.name)}_${fileDate()}.csv`;
+  download(fn, csv, 'text/csv;charset=utf-8');
+  showMessage('CSV exported', `<p>Downloaded as <b>${esc(fn)}</b> (separator “;”, UTF-8). It opens directly in Excel.</p>` +
+    `<p class="hint">CSV is for reading/analysis only – to continue working in this app, use the JSON file.</p>`);
+}
+
+/**
+ * Basic Microsoft Project XML (MSPDI) export: phases as summary tasks,
+ * tasks, milestones, dates, durations, % complete, notes and all four link
+ * types with lag. Owners, resources and baselines are NOT exported
+ * (decision). A 7-day working calendar (08-12, 13-17) is included so that
+ * MS Project keeps the calendar-day durations of this app. Tasks without
+ * predecessors get a "Start No Earlier Than" constraint so they keep their
+ * dates. Must be verified by opening it in MS Project (see Help).
+ */
+function exportXML() {
+  const num = numbering();
+  const uid = new Map();
+  let k = 0;
+  for (const p of state.phases) { uid.set(p.id, ++k); for (const t of p.tasks) uid.set(t.id, ++k); }
+  const dt = (n, time) => `${dayToIso(n)}T${time}`;
+  const tasks = allTasks();
+  const pStart = tasks.length ? Math.min(...tasks.map((t) => isoToDay(t.start))) : todayDay();
+  const pEnd = tasks.length ? Math.max(...tasks.map(taskEndDay)) : todayDay();
+  const linkType = { FF: 0, FS: 1, SF: 2, SS: 3 };           // MSPDI codes
+  const weekDays = [1, 2, 3, 4, 5, 6, 7].map((n) =>
+    `<WeekDay><DayType>${n}</DayType><DayWorking>1</DayWorking><WorkingTimes>` +
+    `<WorkingTime><FromTime>08:00:00</FromTime><ToTime>12:00:00</ToTime></WorkingTime>` +
+    `<WorkingTime><FromTime>13:00:00</FromTime><ToTime>17:00:00</ToTime></WorkingTime>` +
+    `</WorkingTimes></WeekDay>`).join('');
+  const out = [];
+  for (const p of state.phases) {
+    const s = phaseSummary(p);
+    const st = s ? s.start : pStart, en = s ? s.end : pStart, days = s ? s.duration : 1;
+    out.push(`<Task><UID>${uid.get(p.id)}</UID><ID>${uid.get(p.id)}</ID><Name>${esc(p.name)}</Name><Type>1</Type><IsNull>0</IsNull>` +
+      `<WBS>${num.get(p.id)}</WBS><OutlineNumber>${num.get(p.id)}</OutlineNumber><OutlineLevel>1</OutlineLevel>` +
+      `<Start>${dt(st, '08:00:00')}</Start><Finish>${dt(en, '17:00:00')}</Finish><Duration>PT${days * 8}H0M0S</Duration>` +
+      `<DurationFormat>7</DurationFormat><Milestone>0</Milestone><Summary>1</Summary><PercentComplete>${s ? s.percent : 0}</PercentComplete></Task>`);
+    for (const t of p.tasks) {
+      const s0 = isoToDay(t.start), ms = t.milestone;
+      const links = t.deps.map((d) => `<PredecessorLink><PredecessorUID>${uid.get(d.pred)}</PredecessorUID><Type>${linkType[d.type]}</Type>` +
+        `<CrossProject>0</CrossProject><LinkLag>${(Number(d.lag) || 0) * 4800}</LinkLag><LagFormat>7</LagFormat></PredecessorLink>`).join('');
+      // ASAP for linked tasks; "Start No Earlier Than" (type 4) for unlinked tasks
+      // (keeps their dates) and for linked tasks with an snet constraint.
+      const snetDay = !t.deps.length ? s0 : (t.snet ? isoToDay(t.snet) : NaN);
+      const constraint = isNaN(snetDay) ? '<ConstraintType>0</ConstraintType>'
+        : `<ConstraintType>4</ConstraintType><ConstraintDate>${dt(snetDay, '08:00:00')}</ConstraintDate>`;
+      out.push(`<Task><UID>${uid.get(t.id)}</UID><ID>${uid.get(t.id)}</ID><Name>${esc(t.name)}</Name><Type>1</Type><IsNull>0</IsNull>` +
+        `<WBS>${num.get(t.id)}</WBS><OutlineNumber>${num.get(t.id)}</OutlineNumber><OutlineLevel>2</OutlineLevel>` +
+        `<Start>${dt(s0, '08:00:00')}</Start><Finish>${ms ? dt(s0, '08:00:00') : dt(taskEndDay(t), '17:00:00')}</Finish>` +
+        `<Duration>PT${ms ? 0 : t.duration * 8}H0M0S</Duration><DurationFormat>7</DurationFormat>` +
+        `<Milestone>${ms ? 1 : 0}</Milestone><Summary>0</Summary><PercentComplete>${ms ? (t.done ? 100 : 0) : t.percent}</PercentComplete>` +
+        `${constraint}${t.note ? `<Notes>${esc(t.note)}</Notes>` : ''}${links}</Task>`);
+    }
+  }
+  const xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
+    `<Project xmlns="http://schemas.microsoft.com/project">\n` +
+    `<SaveVersion>14</SaveVersion><Name>${esc(safeFileName(state.name))}.xml</Name><Title>${esc(state.name)}</Title>` +
+    `<ScheduleFromStart>1</ScheduleFromStart><StartDate>${dt(pStart, '08:00:00')}</StartDate><FinishDate>${dt(pEnd, '17:00:00')}</FinishDate>` +
+    `<CalendarUID>1</CalendarUID><DefaultStartTime>08:00:00</DefaultStartTime><DefaultFinishTime>17:00:00</DefaultFinishTime>` +
+    `<MinutesPerDay>480</MinutesPerDay><MinutesPerWeek>3360</MinutesPerWeek><DaysPerMonth>30</DaysPerMonth>` +
+    `<DurationFormat>7</DurationFormat><WeekStartDay>1</WeekStartDay>\n` +
+    `<Calendars><Calendar><UID>1</UID><Name>7-day calendar (Gantt Chart Planner)</Name><IsBaseCalendar>1</IsBaseCalendar>` +
+    `<BaseCalendarUID>-1</BaseCalendarUID><WeekDays>${weekDays}</WeekDays></Calendar></Calendars>\n` +
+    `<Tasks>\n${out.join('\n')}\n</Tasks>\n</Project>\n`;
+  const fn = `${safeFileName(state.name)}_${fileDate()}.xml`;
+  download(fn, xml, 'application/xml');
+  showMessage('MS Project XML exported',
+    `<p>Downloaded as <b>${esc(fn)}</b>. In Microsoft Project use <b>File → Open</b> and choose the file type <b>XML Format</b>.</p>` +
+    `<p class="hint">Included: phases, tasks, milestones, dates, durations, % complete, notes and all link types with lag. ` +
+    `Not included: owners. This basic export has not been checked against every MS Project version – please verify the result.</p>`);
+}
+</script>
+
+<!-- ======================================================================
+     5. UI DIALOGS
+     ====================================================================== -->
+<script id="ui-dialogs">
+'use strict';
+
+/** Small calendar icon used by the date-picker buttons. */
+const CAL_ICON = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="1.5" y="3" width="13" height="11.5" rx="1.5" fill="none" stroke="currentColor"/><path d="M1.5 6.5h13M5 1.5v3M11 1.5v3" stroke="currentColor" fill="none"/></svg>';
+
+/**
+ * Creates a modal <dialog>, shows it and removes it from the page when it
+ * closes. Esc closes it (returnValue ''). Dialogs can be stacked, e.g. a
+ * confirmation on top of the task dialog.
+ */
+function openDialog(html, onClose) {
+  const d = document.createElement('dialog');
+  d.className = 'dlg';
+  d.innerHTML = html;
+  document.body.appendChild(d);
+  d.addEventListener('close', () => { d.remove(); if (onClose) onClose(d.returnValue); });
+  d.showModal();
+  return d;
+}
+
+/**
+ * Message / question dialog (decision: modal with an explicit button
+ * instead of transient toasts). Resolves with the value of the pressed
+ * button, or 'cancel' for Esc.
+ */
+function showMessage(title, bodyHtml, buttons = [{ label: 'OK', value: 'ok', primary: true }]) {
+  return new Promise((resolve) => {
+    const d = openDialog(
+      `<h2>${esc(title)}</h2><div class="dlg-body">${bodyHtml}</div><div class="btns">` +
+      buttons.map((b) => `<button data-v="${esc(b.value)}" class="${b.primary ? 'primary' : ''} ${b.danger ? 'danger' : ''}">${esc(b.label)}</button>`).join('') +
+      `</div>`,
+      (v) => resolve(v || 'cancel'));
+    $$('.btns button', d).forEach((b) => b.addEventListener('click', () => d.close(b.dataset.v)));
+    const focus = $('button.primary', d) || $('button.danger', d);
+    if (focus) focus.focus();
+  });
+}
+
+/** Yes/No confirmation. Resolves true only when the OK button was pressed. */
+async function confirmBox(title, bodyHtml, okLabel = 'OK', danger = false) {
+  const v = await showMessage(title, bodyHtml, [
+    { label: 'Cancel', value: 'cancel' },
+    { label: okLabel, value: 'ok', primary: !danger, danger },
+  ]);
+  return v === 'ok';
+}
+
+/**
+ * Connects a DD.MM.YYYY text field with the native date picker hidden
+ * behind the calendar button. On phones a tap opens the picker directly;
+ * on desktop Chrome/Edge showPicker() opens it.
+ */
+function wireDatePicker(txt) {
+  const btn = txt.parentElement.querySelector('.pick');
+  const pick = btn.querySelector('.pick-in');
+  const sync = () => { const n = dispToDay(txt.value); pick.value = isNaN(n) ? '' : dayToIso(n); };
+  btn.addEventListener('pointerdown', sync);
+  pick.addEventListener('focus', sync);
+  btn.addEventListener('click', () => {
+    if (txt.readOnly) return;
+    sync();
+    try { pick.showPicker(); } catch (_) { /* e.g. iOS: the tap already opened the native picker */ }
+  });
+  pick.addEventListener('change', () => {
+    const n = isoToDay(pick.value);
+    if (!isNaN(n)) { txt.value = dayToDisp(n); txt.dispatchEvent(new Event('change', { bubbles: true })); }
+  });
+}
+
+/** Markup of a date field with its picker button. */
+function dateField(id) {
+  return `<span class="datebox"><input id="${id}" class="dtxt" autocomplete="off" placeholder="DD.MM.YYYY">` +
+    `<span class="pick" title="Pick a date">${CAL_ICON}<input type="date" class="pick-in" tabindex="-1" aria-hidden="true"></span></span>`;
+}
+
+/**
+ * Practical examples of the link types (mechanical installation in a
+ * pharmaceutical engineering project). Shown in the task dialog, the link
+ * dialog and the help.
+ */
+function depExamplesHTML(collapsible) {
+  const dl = `<dl class="ex">
+    <dt>FS · Finish-to-start</dt>
+    <dd>Install process piping → Pressure-test the piping. The pressure test can start only after the piping is complete.</dd>
+    <dt>SS · Start-to-start (here with +2 days lag)</dt>
+    <dd>Install pipe supports → Install process piping, SS+2: piping starts 2 days after the supports have started, then both run in parallel with the supports staying ahead.</dd>
+    <dt>FF · Finish-to-finish</dt>
+    <dd>Install HVAC ductwork → Insulate the ductwork. Insulation cannot finish before the last duct section is installed.</dd>
+    <dt>SF · Start-to-finish</dt>
+    <dd>Start up the new WFI loop (water for injection) → Operate the old WFI loop. The old loop may only finish once the new one has started, so the WFI supply is never interrupted.</dd>
+    <dt>Lag (+ days)</dt>
+    <dd>Grout the pump-skid foundation → Set the pump skid, FS+3: the grout needs 3 days to cure before the skid may be placed.</dd>
+    <dt>Lead (− days)</dt>
+    <dd>Mechanical completion of the CIP skid (clean-in-place) → IQ walk-down (installation qualification), FS−2: the walk-down starts 2 days before mechanical completion, on the sections that are already finished.</dd>
+  </dl>`;
+  return collapsible ? `<details class="ex"><summary>Examples of FS, SS, FF, SF, lag and lead</summary>${dl}</details>` : dl;
+}
+
+/** Opens the details dialog of a task or a phase. */
+function openDetails(id, focusDeps) {
+  if (findTask(id)) openTaskDialog(id, focusDeps);
+  else if (findPhase(id)) openPhaseDialog(id);
+}
+
+/**
+ * TASK DIALOG: every property of a task, including type (task/milestone),
+ * phase, note and the list of predecessors. Changes are applied only on
+ * "Save" and form ONE undo step.
+ */
+function openTaskDialog(id, focusDeps) {
+  const loc = findTask(id);
+  if (!loc) return;
+  const t = loc.task;
+  const num = numbering();
+  const original = JSON.parse(JSON.stringify(t));
+  let deps = original.deps.map((d) => ({ ...d }));   // working copy of the links
+  // Tasks that may be chosen as predecessors: no milestones, not itself and
+  // nothing that already depends on this task (that would create a loop).
+  const blocked = dependentsOf(id);
+  blocked.add(id);
+  const candidates = allTasks().filter((x) => !x.milestone && !blocked.has(x.id));
+  const phaseOpts = state.phases.map((p) =>
+    `<option value="${esc(p.id)}"${p.id === loc.phase.id ? ' selected' : ''}>${esc(num.get(p.id) + ' ' + p.name)}</option>`).join('');
+
+  const d = openDialog(`
+    <h2>Task ${esc(num.get(id))}</h2>
+    <label>Name<input id="f-name" value="${esc(t.name)}" autocomplete="off"></label>
+    <div class="grid2">
+      <label>Type<select id="f-type"><option value="task">Task</option><option value="ms">Milestone</option></select></label>
+      <label>Phase<select id="f-phase">${phaseOpts}</select></label>
+    </div>
+    <div class="grid3">
+      <label>Start${dateField('f-start')}</label>
+      <label class="nm">End${dateField('f-end')}</label>
+      <label class="nm">Duration (days)<input id="f-dur" type="number" min="1" step="1" inputmode="numeric"></label>
+    </div>
+    <p class="hint" id="f-auto">The start follows the predecessors below. Shift it relative to a predecessor with lag (+ days) or lead (− days), or keep it from starting too early with “Start no earlier than”.</p>
+    <label class="snetrow">Start no earlier than (optional constraint)${dateField('f-snet')}</label>
+    <div class="grid3">
+      <label class="nm">% complete<input id="f-pct" type="number" min="0" max="100" step="1" inputmode="numeric"></label>
+      <label class="ms chk"><input type="checkbox" id="f-done"> Milestone reached</label>
+      <label>Owner<input id="f-person" value="${esc(t.person)}" autocomplete="off"></label>
+    </div>
+    <label>Note <span id="f-cnt"></span><textarea id="f-note" rows="3" maxlength="${NOTE_MAX}">${esc(t.note)}</textarea></label>
+    <fieldset class="nm deps"><legend>Predecessors – this task depends on …</legend>
+      <div id="f-deps"></div>
+      <button type="button" id="f-adddep">+ Add predecessor</button>
+      <p class="hint" style="margin:6px 0 0">FS finish-to-start · SS start-to-start · FF finish-to-finish · SF start-to-finish. Lag in calendar days, negative = lead.</p>
+      ${depExamplesHTML(true)}
+    </fieldset>
+    <div class="btns">
+      <button class="danger" id="f-del">Delete</button>
+      <button id="f-dup">Duplicate</button>
+      <span class="spacer"></span>
+      <button id="f-cancel">Cancel</button>
+      <button class="primary" id="f-save">Save</button>
+    </div>`);
+
+  const f = (sel) => d.querySelector(sel);
+  const fName = f('#f-name'), fType = f('#f-type'), fPhase = f('#f-phase'), fStart = f('#f-start'), fEnd = f('#f-end'),
+    fDur = f('#f-dur'), fPct = f('#f-pct'), fDone = f('#f-done'), fPerson = f('#f-person'), fNote = f('#f-note'),
+    fCnt = f('#f-cnt'), fDeps = f('#f-deps'), fAuto = f('#f-auto');
+  const s0 = isoToDay(t.start);
+  fType.value = t.milestone ? 'ms' : 'task';
+  fStart.value = dayToDisp(s0);
+  fDur.value = t.milestone ? 1 : t.duration;
+  fEnd.value = dayToDisp(s0 + (t.milestone ? 0 : t.duration - 1));
+  fPct.value = t.percent;
+  fDone.checked = !!t.done;
+  const fSnet = f('#f-snet');
+  fSnet.value = t.snet ? dayToDisp(isoToDay(t.snet)) : '';
+  fSnet.placeholder = 'none';
+  wireDatePicker(fSnet);
+  wireDatePicker(fStart);
+  wireDatePicker(fEnd);
+
+  /** Current duration from the field (always a whole number >= 1). */
+  const curDur = () => { const n = Math.round(Number(fDur.value)); return Number.isFinite(n) && n >= 1 ? n : 1; };
+
+  /** Shows/hides fields depending on the type and locks the start of dependent tasks. */
+  function refresh() {
+    const ms = fType.value === 'ms';
+    $$('.nm', d).forEach((el) => { el.hidden = ms; });
+    $$('.ms', d).forEach((el) => { el.hidden = !ms; });
+    const auto = !ms && deps.length > 0;
+    fStart.readOnly = auto;
+    fStart.parentElement.querySelector('.pick').classList.toggle('off', auto);
+    fAuto.hidden = !auto;
+    f('.snetrow').hidden = !auto;
+    fCnt.textContent = `(${fNote.value.length}/${NOTE_MAX})`;
+  }
+
+  /** One row of the predecessor list. */
+  function depRowHTML(dep, i) {
+    const opts = `<option value="">— choose task —</option>` + candidates.map((c) =>
+      `<option value="${esc(c.id)}"${c.id === dep.pred ? ' selected' : ''}>${esc(num.get(c.id) + ' ' + c.name)}</option>`).join('');
+    return `<div class="deprow" data-i="${i}">
+      <select data-dp="pred" aria-label="Predecessor task">${opts}</select>
+      <select data-dp="type" aria-label="Link type">${DEP_TYPES.map((x) => `<option${x === dep.type ? ' selected' : ''}>${x}</option>`).join('')}</select>
+      <input data-dp="lag" type="number" step="1" value="${Number(dep.lag) || 0}" aria-label="Lag in days" title="Lag in days (negative = lead)">
+      <button type="button" data-dp="rm" title="Remove this predecessor" aria-label="Remove">&#10005;</button></div>`;
+  }
+
+  /** Redraws the predecessor list. */
+  function renderDeps(focusLast) {
+    fDeps.innerHTML = deps.length ? deps.map(depRowHTML).join('')
+      : '<p class="hint" style="margin:2px 0 8px">No predecessors – the task starts on its own start date.</p>';
+    if (focusLast) { const sels = $$('select[data-dp="pred"]', fDeps); if (sels.length) sels[sels.length - 1].focus(); }
+    refresh();
+  }
+
+  // Keep start, end and duration consistent while typing.
+  fStart.addEventListener('change', () => {
+    const s = dispToDay(fStart.value);
+    if (!isNaN(s)) { fStart.value = dayToDisp(s); fEnd.value = dayToDisp(s + curDur() - 1); }
+  });
+  fEnd.addEventListener('change', () => {
+    const s = dispToDay(fStart.value), e = dispToDay(fEnd.value);
+    if (isNaN(s) || isNaN(e)) return;
+    const dur = Math.max(1, e - s + 1);          // end before start -> corrected to a 1-day task
+    fDur.value = dur;
+    fEnd.value = dayToDisp(s + dur - 1);
+  });
+  fDur.addEventListener('change', () => {
+    fDur.value = curDur();
+    const s = dispToDay(fStart.value);
+    if (!isNaN(s)) fEnd.value = dayToDisp(s + curDur() - 1);
+  });
+  fPct.addEventListener('change', () => { fPct.value = clampInt(fPct.value, 0, 100, 0); });
+  fNote.addEventListener('input', refresh);
+
+  // Task <-> milestone. Milestones have no links, so converting asks first.
+  fType.addEventListener('change', async () => {
+    if (fType.value === 'ms') {
+      const succ = successorLinkCount(id);
+      const n = deps.length + succ;
+      if (n > 0) {
+        const ok = await confirmBox('Convert to milestone?',
+          `<p>This task has <b>${deps.length}</b> predecessor link(s) and <b>${succ}</b> successor link(s).</p>` +
+          `<p>Milestones cannot have dependencies, so ${n === 1 ? 'this link' : 'these links'} will be removed when you save.</p>`, 'Convert');
+        if (!ok) { fType.value = 'task'; refresh(); return; }
+      }
+      deps = [];
+    } else {
+      deps = original.milestone ? [] : original.deps.map((x) => ({ ...x }));
+      const s = dispToDay(fStart.value);
+      if (!isNaN(s)) fEnd.value = dayToDisp(s + curDur() - 1);
+    }
+    renderDeps(false);
+  });
+
+  // Predecessor list editing.
+  fDeps.addEventListener('change', (e) => {
+    const row = e.target.closest('.deprow');
+    if (!row) return;
+    const dep = deps[Number(row.dataset.i)];
+    const key = e.target.dataset.dp;
+    if (key === 'pred') dep.pred = e.target.value;
+    else if (key === 'type') dep.type = e.target.value;
+    else if (key === 'lag') { dep.lag = clampInt(e.target.value, -100000, 100000, 0); e.target.value = dep.lag; }
+    refresh();
+  });
+  fDeps.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-dp="rm"]');
+    if (!b) return;
+    deps.splice(Number(b.closest('.deprow').dataset.i), 1);
+    renderDeps(false);
+  });
+  f('#f-adddep').addEventListener('click', () => {
+    if (!candidates.length) {
+      showMessage('No possible predecessor',
+        '<p>No other task can be a predecessor of this one. Milestones and tasks that already depend on this task are not offered, to prevent circular dependencies.</p>');
+      return;
+    }
+    deps.push({ pred: '', type: 'FS', lag: 0 });
+    renderDeps(true);
+  });
+
+  /** Validates the form and applies it as one undo step. Returns true on success. */
+  async function save() {
+    const active = d.querySelector(':focus');
+    if (active && active.matches('input, select, textarea')) active.dispatchEvent(new Event('change', { bubbles: true }));
+    const ms = fType.value === 'ms';
+    const start = dispToDay(fStart.value);
+    if (isNaN(start)) {
+      await showMessage('Invalid start date', `<p>“${esc(fStart.value)}” is not a valid date. Please use DD.MM.YYYY, for example ${dayToDisp(todayDay())}.</p>`);
+      fStart.focus();
+      return false;
+    }
+    if (!ms && isNaN(dispToDay(fEnd.value))) {
+      await showMessage('Invalid end date', `<p>“${esc(fEnd.value)}” is not a valid date. Please use DD.MM.YYYY.</p>`);
+      fEnd.focus();
+      return false;
+    }
+    let snet = NaN;
+    if (!ms && deps.length && fSnet.value.trim()) {
+      snet = dispToDay(fSnet.value);
+      if (isNaN(snet)) {
+        await showMessage('Invalid date', `<p>“${esc(fSnet.value)}” is not a valid “start no earlier than” date. Use DD.MM.YYYY or leave the field empty.</p>`);
+        fSnet.focus();
+        return false;
+      }
+    }
+    const clean = [];
+    for (let i = 0; i < deps.length && !ms; i++) {
+      const x = deps[i];
+      if (!x.pred) { await showMessage('Predecessor missing', `<p>Row ${i + 1} of the predecessor list has no task selected. Choose a task or remove the row.</p>`); return false; }
+      if (clean.some((c) => c.pred === x.pred)) { await showMessage('Duplicate predecessor', `<p>Task ${esc(num.get(x.pred))} is listed more than once. Keep one link per predecessor.</p>`); return false; }
+      clean.push({ pred: x.pred, type: DEP_TYPES.includes(x.type) ? x.type : 'FS', lag: clampInt(x.lag, -100000, 100000, 0) });
+    }
+    // Safety net (the list above never offers such tasks): no loops allowed.
+    const { cycle } = topoOrder(allTasks(), (x) => (x.id === id ? clean : x.deps));
+    if (cycle) {
+      await showMessage('Circular dependency', `<p>This would create a loop: ${cycle.map((c) => esc(num.get(c))).join(' → ')}. The change was not saved.</p>`);
+      return false;
+    }
+    const phaseId = fPhase.value;
+    commit(() => {
+      const cur = findTask(id);
+      if (!cur) return false;
+      const tt = cur.task;
+      tt.name = fName.value.trim() || 'Untitled task';
+      tt.milestone = ms;
+      tt.start = dayToIso(start);
+      tt.duration = ms ? 0 : curDur();
+      tt.percent = ms ? 0 : clampInt(fPct.value, 0, 100, 0);
+      tt.done = ms ? fDone.checked : false;
+      tt.person = fPerson.value.trim();
+      tt.note = fNote.value.slice(0, NOTE_MAX);
+      tt.deps = ms ? [] : clean;
+      if (!isNaN(snet) && clean.length) tt.snet = dayToIso(snet); else delete tt.snet;
+      if (ms) for (const x of allTasks()) x.deps = x.deps.filter((dd) => dd.pred !== id);  // milestones cannot be predecessors
+      if (phaseId !== cur.phase.id) {
+        const np = findPhase(phaseId);
+        if (np) { cur.phase.tasks.splice(cur.index, 1); np.phase.tasks.push(tt); np.phase.collapsed = false; }
+      }
+    });
+    return true;
+  }
+
+  f('#f-save').addEventListener('click', async () => { if (await save()) d.close('saved'); });
+  f('#f-cancel').addEventListener('click', () => d.close('cancel'));
+  f('#f-dup').addEventListener('click', async () => { if (await save()) { d.close('dup'); duplicateTask(id); } });
+  f('#f-del').addEventListener('click', async () => {
+    const succ = successorLinkCount(id);
+    const ok = await confirmBox('Delete task?',
+      `<p>Delete <b>${esc(num.get(id))} ${esc(t.name)}</b>?</p>` +
+      (succ ? `<p>${succ} dependency link(s) from other tasks point to it and will be removed.</p>` : '') +
+      '<p class="hint">You can undo this with Ctrl+Z.</p>', 'Delete', true);
+    if (ok) { d.close('del'); deleteTask(id); }
+  });
+  // Enter in a single-line field = Save.
+  d.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing && e.target.matches('input:not([type=checkbox])')) { e.preventDefault(); f('#f-save').click(); }
+  });
+
+  renderDeps(false);
+  if (focusDeps) {
+    const first = $('select[data-dp="pred"]', fDeps) || f('#f-adddep');
+    first.focus();
+  } else {
+    fName.focus();
+  }
+}
+
+/** PHASE DIALOG: rename, add a task into it, or delete it with all its tasks. */
+function openPhaseDialog(id) {
+  const loc = findPhase(id);
+  if (!loc) return;
+  const p = loc.phase;
+  const num = numbering();
+  const s = phaseSummary(p);
+  const d = openDialog(`
+    <h2>Phase ${esc(num.get(id))}</h2>
+    <label>Name<input id="g-name" value="${esc(p.name)}" autocomplete="off"></label>
+    <p class="hint">${p.tasks.length} task(s)${s ? ` · ${dayToDisp(s.start)} – ${dayToDisp(s.end)} · ${s.duration} days · ${s.percent}% complete` : ''}.
+      Dates and % of a phase are calculated from its tasks.</p>
+    <div class="btns">
+      <button class="danger" id="g-del">Delete phase</button>
+      <button id="g-add">+ Task in this phase</button>
+      <span class="spacer"></span>
+      <button id="g-cancel">Cancel</button>
+      <button class="primary" id="g-save">Save</button>
+    </div>`);
+  const name = $('#g-name', d);
+  const apply = () => commit(() => { const cur = findPhase(id); if (!cur) return false; cur.phase.name = name.value.trim() || 'Untitled phase'; });
+  $('#g-save', d).addEventListener('click', () => { apply(); d.close('saved'); });
+  $('#g-cancel', d).addEventListener('click', () => d.close('cancel'));
+  $('#g-add', d).addEventListener('click', () => { apply(); d.close('add'); ui.selected = id; addTask(); });
+  $('#g-del', d).addEventListener('click', async () => {
+    const n = p.tasks.length;
+    const ok = await confirmBox('Delete phase?',
+      `<p>Delete phase <b>${esc(num.get(id))} ${esc(p.name)}</b>${n ? ` and its <b>${n}</b> task(s)` : ''}?</p>` +
+      (n ? '<p>Dependency links from other tasks to these tasks will also be removed.</p>' : '') +
+      '<p class="hint">You can undo this with Ctrl+Z.</p>', 'Delete', true);
+    if (ok) { d.close('del'); deletePhase(id); }
+  });
+  d.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing && e.target === name) { e.preventDefault(); $('#g-save', d).click(); } });
+  name.focus();
+  name.select();
+}
+
+/**
+ * LINK DIALOG (click on an arrow): change the type or lag of one dependency,
+ * or delete it. One undo step.
+ */
+function openLinkDialog(succId, predId) {
+  const s = findTask(succId), p = findTask(predId);
+  if (!s || !p) return;
+  const dep = s.task.deps.find((x) => x.pred === predId);
+  if (!dep) return;
+  const num = numbering();
+  const names = { FS: 'FS – finish-to-start', SS: 'SS – start-to-start', FF: 'FF – finish-to-finish', SF: 'SF – start-to-finish' };
+  const d = openDialog(`
+    <h2>Link ${esc(num.get(predId))} → ${esc(num.get(succId))}</h2>
+    <p><b>${esc(p.task.name)}</b> (predecessor) → <b>${esc(s.task.name)}</b> (successor)</p>
+    <div class="grid2">
+      <label>Type<select id="l-type">${DEP_TYPES.map((t) => `<option value="${t}"${t === dep.type ? ' selected' : ''}>${names[t]}</option>`).join('')}</select></label>
+      <label>Lag in days (negative = lead)<input id="l-lag" type="number" step="1" value="${Number(dep.lag) || 0}"></label>
+    </div>
+    ${depExamplesHTML(true)}
+    <div class="btns">
+      <button class="danger" id="l-del">Delete link</button>
+      <span class="spacer"></span>
+      <button id="l-cancel">Cancel</button>
+      <button class="primary" id="l-save">Save</button>
+    </div>`);
+  const save = () => {
+    const type = $('#l-type', d).value, lag = clampInt($('#l-lag', d).value, -100000, 100000, 0);
+    commit(() => { const x = findTask(succId)?.task.deps.find((k) => k.pred === predId); if (!x) return false; x.type = type; x.lag = lag; });
+    d.close('saved');
+  };
+  $('#l-save', d).addEventListener('click', save);
+  $('#l-cancel', d).addEventListener('click', () => d.close('cancel'));
+  $('#l-del', d).addEventListener('click', () => {
+    commit(() => { const x = findTask(succId); if (!x) return false; x.task.deps = x.task.deps.filter((k) => k.pred !== predId); });
+    d.close('del');
+  });
+  d.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing && e.target.matches('input')) { e.preventDefault(); save(); } });
+  $('#l-type', d).focus();
+}
+
+/**
+ * PUBLIC HOLIDAYS DIALOG: choose the countries (Slovenia, USA) and switch
+ * single holidays off or on again, separately for every year. The settings
+ * are part of the project file. One undo step.
+ */
+function openHolidaysDialog() {
+  const draft = JSON.parse(JSON.stringify(state.holidays || defaultHolidays()));
+  const off = new Set(draft.off);
+  const g = lastLayout ? lastLayout.g : timelineGeom();
+  const thisYear = dayParts(todayDay()).y;
+  const y0 = Math.min(dayParts(g.start).y, thisYear), y1 = Math.max(dayParts(g.end).y, thisYear) + 1;
+  const years = [];
+  for (let y = y0; y <= y1; y++) years.push(y);
+  const d = openDialog(`
+    <h2>Public holidays</h2>
+    <p class="hint" style="margin:0 0 8px">Calculated offline and shown as shaded days on the timeline. Durations are not changed (calendar days).</p>
+    <div class="grid2">
+      ${Object.entries(HOLIDAY_COUNTRIES).map(([cc, name]) => `<label class="chk"><input type="checkbox" data-cc="${cc}"${draft.countries.includes(cc) ? ' checked' : ''}> ${esc(name)}</label>`).join('')}
+    </div>
+    <div class="grid2">
+      <label>Year<select id="h-year">${years.map((y) => `<option${y === thisYear ? ' selected' : ''}>${y}</option>`).join('')}</select></label>
+      <div class="btns" style="margin:0;align-self:end;padding-bottom:10px"><button id="h-all">All on</button><button id="h-none">All off</button></div>
+    </div>
+    <div class="holi" id="h-list"></div>
+    <p class="hint">Slovenia: work-free days (dela prosti dnevi) under the ZPDPD act. USA: the 11 federal holidays, on the observed day. Laws can change – switch off what does not apply.</p>
+    <div class="btns"><span class="spacer"></span><button id="h-cancel">Cancel</button><button class="primary" id="h-save">Save</button></div>`);
+  const list = $('#h-list', d), yearSel = $('#h-year', d);
+  const yearItems = () => draft.countries.flatMap((cc) => holidaysForYear(cc, Number(yearSel.value)));
+  function renderList() {
+    const y = Number(yearSel.value);
+    if (!draft.countries.length) { list.innerHTML = '<p class="hint" style="margin:8px 0">No country selected – no holidays are shown.</p>'; return; }
+    list.innerHTML = draft.countries.map((cc) => `<h4>${esc(HOLIDAY_COUNTRIES[cc])} ${y}</h4>` +
+      holidaysForYear(cc, y).map((x) => `<label class="hr"><input type="checkbox" data-key="${esc(x.key)}"${off.has(x.key) ? '' : ' checked'}>` +
+        `<span class="hd">${dayToDisp(x.day)}</span><span class="wd">${WEEKDAYS[mondayIndex(x.day)]}</span><span>${esc(x.name)}</span></label>`).join('')).join('');
+  }
+  $$('[data-cc]', d).forEach((cb) => cb.addEventListener('change', () => {
+    draft.countries = Object.keys(HOLIDAY_COUNTRIES).filter((cc) => $(`[data-cc="${cc}"]`, d).checked);
+    renderList();
+  }));
+  yearSel.addEventListener('change', renderList);
+  list.addEventListener('change', (e) => { const k = e.target.dataset.key; if (!k) return; if (e.target.checked) off.delete(k); else off.add(k); });
+  $('#h-all', d).addEventListener('click', () => { for (const x of yearItems()) off.delete(x.key); renderList(); });
+  $('#h-none', d).addEventListener('click', () => { for (const x of yearItems()) off.add(x.key); renderList(); });
+  $('#h-cancel', d).addEventListener('click', () => d.close('cancel'));
+  $('#h-save', d).addEventListener('click', () => {
+    commit(() => { state.holidays = { countries: draft.countries, off: [...off].sort() }; });
+    d.close('saved');
+  });
+  renderList();
+  yearSel.focus();
+}
+
+/** Help text; the short variant is used on the welcome screen. */
+function helpHTML(short) {
+  const k = (s) => `<kbd>${s}</kbd>`;
+  const basics = `
+    <ul>
+      <li><b>+ Phase</b> / <b>+ Task</b> add rows. Edit names, dates, days, % and owner directly in the table.</li>
+      <li>Tap a row number (e.g. <b>1.2</b>) or a bar to open all details: task or milestone, phase, note and predecessors.</li>
+      <li><b>Nothing is saved automatically.</b> Use Menu → <b>Save project (JSON)</b> and later Menu → <b>Open project</b>.</li>
+    </ul>`;
+  if (short) return `<div class="help">${basics}<p class="hint">Menu → Help &amp; shortcuts shows this and more at any time.</p></div>`;
+  return `<div class="help">${basics}
+    <ul>
+      <li>Tasks with predecessors are <b>scheduled automatically</b> (as soon as possible): their start follows the links and moves when a predecessor moves. Shift them with a lag (+ days) or lead (− days).</li>
+      <li>Link types: <b>FS</b> finish-to-start, <b>SS</b> start-to-start, <b>FF</b> finish-to-finish, <b>SF</b> start-to-finish. Loops are prevented. Examples below.</li>
+      <li><b>Linking with the mouse:</b> point at a bar – small circles appear at its start and finish. Drag a circle onto the start or finish of another task: finish → start = FS, start → start = SS, finish → finish = FF, start → finish = SF. Drag the tip of an arrow onto another task to re-connect it; click an arrow to change its type or lag, or to delete it. (On touch screens use the task dialog.)</li>
+      <li><b>Start no earlier than:</b> typing a start date on a linked task sets this constraint (orange mark). The task then starts at the later of the link result and that date. Clear the field to remove it.</li>
+      <li><b>Public holidays</b> (Menu → Public holidays): Slovenia and/or USA, calculated offline; single holidays can be switched off per year. They are shown only – durations stay in calendar days.</li>
+      <li>Durations are <b>calendar days</b> (weekends included), at least 1 day. An end date before the start is corrected automatically.</li>
+      <li><b>Milestones</b> (circles) mark a date and have no links. Tick “reached” to fill the circle.</li>
+      <li>Phases: ▾/▸ collapses a phase; its bar spans all of its tasks. Use ↑/↓ to reorder rows – numbers update automatically.</li>
+      <li>The browser warns you before closing the page with unsaved changes. Undo keeps the last 10 steps (an opened file counts as one step).</li>
+      <li>Exports: CSV for Excel, basic MS Project XML (owners not included – please check the result in MS Project), Print/PDF on A4 landscape, split into several pages if needed.</li>
+    </ul>
+    <h3>Examples of link types</h3>
+    ${depExamplesHTML(false)}
+    <h3>Keyboard shortcuts</h3>
+    <table class="keys">
+      <tr><td>${k('Ctrl')} + ${k('S')}</td><td>Save project (JSON)</td></tr>
+      <tr><td>${k('Ctrl')} + ${k('Z')}</td><td>Undo (outside of a field that is being edited)</td></tr>
+      <tr><td>${k('Ctrl')} + ${k('Y')} &nbsp;or&nbsp; ${k('Ctrl')} + ${k('Shift')} + ${k('Z')}</td><td>Redo</td></tr>
+      <tr><td>${k('Alt')} + ${k('N')}</td><td>New task (Ctrl+N is reserved by the browser)</td></tr>
+      <tr><td>${k('Ctrl')} + ${k('P')}</td><td>Print / save as PDF</td></tr>
+      <tr><td>${k('Tab')} / ${k('Shift')} + ${k('Tab')}</td><td>Next / previous field</td></tr>
+      <tr><td>${k('Enter')}</td><td>Confirm a table edit · Save in a dialog</td></tr>
+      <tr><td>${k('Esc')}</td><td>Undo the current table edit · close a dialog</td></tr>
+    </table>
+    <p class="hint">On a Mac use ⌘ instead of Ctrl and ⌥ instead of Alt.</p>
+    <p class="hint">Gantt Chart Planner 2.0 · works offline · no data leaves this device.</p></div>`;
+}
+
+/** Help dialog (Menu → Help & shortcuts). */
+function openHelp() {
+  showMessage('Help & shortcuts', helpHTML(false));
+}
+
+/**
+ * WELCOME SCREEN shown at every start (the app keeps no memory between
+ * sessions): project name, short instructions and how to begin.
+ */
+function openWelcome() {
+  const d = openDialog(`
+    <h2>Gantt Chart Planner</h2>
+    <p>A standalone Gantt chart editor that works offline. Nothing is installed and no data leaves this device – your project lives in the JSON file you save.</p>
+    <label>Project name<input id="w-name" value="${esc(state.name)}" autocomplete="off"></label>
+    ${helpHTML(true)}
+    <div class="btns">
+      <button id="w-open">Open project file…</button>
+      <button id="w-empty">Start empty</button>
+      <span class="spacer"></span>
+      <button class="primary" id="w-start">Start with example</button>
+    </div>`);
+  const name = $('#w-name', d);
+  const takeName = () => { state.name = name.value.trim() || 'My Project'; requestRender(); };
+  $('#w-start', d).addEventListener('click', () => { takeName(); d.close('start'); });
+  $('#w-empty', d).addEventListener('click', () => {
+    takeName();
+    state.phases = [];
+    undoStack = []; redoStack = []; dirty = false; ui.selected = null;
+    d.close('empty');
+    requestRender();
+  });
+  $('#w-open', d).addEventListener('click', () => { takeName(); d.close('open'); openFilePicker(); });
+  name.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); $('#w-start', d).click(); } });
+  $('#w-start', d).focus();
+}
+</script>
+
+<!-- ======================================================================
+     6. UI RENDER: table + timeline
+     ====================================================================== -->
+<script id="ui-render">
+'use strict';
+
+/** Last layout, used for scrolling to dates and for keeping the view on zoom changes. */
+let lastLayout = null;
+/** Data key (e.g. "t5|name") of the field that should get focus after the next render. */
+let pendingFocus = null;
+let renderQueued = false;
+
+/** Coalesces many change requests into one render per animation frame. */
+function requestRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; render(); });
+}
+
+/** Current row height in px (CSS variable --rh: 32 on desktop, 45 on touch screens). */
+function rowHeight() {
+  return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--rh')) || 32;
+}
+
+/** Column widths in px. Touch screens get 44 px buttons; narrow screens a narrower name column. */
+function colDefs() {
+  const coarse = matchMedia('(pointer: coarse)').matches;
+  const narrow = matchMedia('(max-width: 600px)').matches;
+  const b = coarse ? 44 : 30;
+  return {
+    id: coarse ? 50 : 48, name: narrow ? 130 : 240, act: b * 2 + 1,
+    start: coarse ? 120 : 92, end: coarse ? 120 : 92, dur: coarse ? 64 : 50,
+    pct: coarse ? 64 : 50, person: coarse ? 120 : 110, pred: coarse ? 140 : 120,
+  };
+}
+
+/**
+ * Timeline geometry for the current zoom.
+ * Week view: 22 px per day, weeks start on Monday, at least 9 weeks shown.
+ * Month view: 5 px per day, whole months, at least 7 months shown.
+ * Always covers all tasks AND today (so "Today" always works).
+ */
+function timelineGeom() {
+  const today = todayDay();
+  let min = today, max = today;
+  for (const t of allTasks()) {
+    min = Math.min(min, isoToDay(t.start));
+    max = Math.max(max, taskEndDay(t));
+  }
+  let start, end, dayW;
+  if (ui.zoom === 'month') {
+    dayW = 5;
+    start = firstOfMonth(min, -1);
+    end = firstOfMonth(max, 2) - 1;
+    if (end - start < 200) end = firstOfMonth(start, 7) - 1;
+  } else {
+    dayW = 22;
+    start = min - mondayIndex(min) - 7;
+    end = max - mondayIndex(max) + 6 + 14;
+    if (end - start < 62) end = start + 62;
+  }
+  return { zoom: ui.zoom, start, end, dayW, width: (end - start + 1) * dayW, x: (n) => (n - start) * dayW,
+    hdrH: ui.zoom === 'month' ? 66 : 44,          // month view has a third header line with week numbers
+    hol: holidayIndex(start, end) };
+}
+
+/**
+ * Rows to display, honouring collapsed phases and the search text. While
+ * searching, matching tasks are shown even inside collapsed phases; a phase
+ * whose name matches shows all its tasks.
+ */
+function visibleRows() {
+  const f = ui.filter.trim().toLowerCase();
+  const rows = [];
+  for (const p of state.phases) {
+    const phaseMatch = !f || p.name.toLowerCase().includes(f);
+    const tasks = p.tasks.filter((t) => !f || phaseMatch || t.name.toLowerCase().includes(f));
+    if (f && !phaseMatch && !tasks.length) continue;
+    rows.push({ kind: 'phase', phase: p });
+    if (!p.collapsed || f) for (const t of tasks) rows.push({ kind: 'task', task: t, phase: p });
+  }
+  return rows;
+}
+
+/** SVG: timeline header (week view: weeks + days; month view: years + months + ISO week numbers). */
+function timelineHeaderInner(g) {
+  const H = 44, mid = 22;
+  let s = `<line x1="0" y1="${mid + 0.5}" x2="${g.width}" y2="${mid + 0.5}" class="th-l"/>`;
+  const seg = (from, nextFn, y1, y2, label, minW) => {
+    let n = from;
+    while (n <= g.end) {
+      const next = Math.min(nextFn(n), g.end + 1);
+      const x = g.x(n), w = (next - n) * g.dayW;
+      s += `<line x1="${x + 0.5}" y1="${y1}" x2="${x + 0.5}" y2="${y2}" class="th-l"/>`;
+      if (w >= minW) s += `<text x="${x + 5}" y="${y1 + 15}" class="th-t${y1 === 0 ? ' th-b' : ''}">${label(n)}</text>`;
+      n = next;
+    }
+  };
+  if (g.zoom === 'week') {
+    // Top line: one label per week ("W39 · Sep 2026"), so the month is visible wherever you scroll.
+    seg(g.start, (n) => n + 7, 0, mid, (n) => { const p = dayParts(n); return `W${isoWeek(n)} · ${MONTHS[p.m]} ${p.y}`; }, 90);
+    for (let n = g.start; n <= g.end; n++) {
+      const x = g.x(n), mon = mondayIndex(n) === 0;
+      if (mon) s += `<line x1="${x + 0.5}" y1="${mid}" x2="${x + 0.5}" y2="${H}" class="th-l"/>`;
+      const hol = g.hol.get(n);
+      s += `<text x="${x + g.dayW / 2}" y="${mid + 15}" text-anchor="middle" class="th-t${mon ? ' th-b' : ''}${hol ? ' th-hol' : ''}">${dayParts(n).d}</text>`;
+      if (hol) s += `<rect x="${x}" y="${mid}" width="${g.dayW}" height="${H - mid}" fill="transparent"><title>${esc(dayToDisp(n) + '\n' + hol.join('\n'))}</title></rect>`;
+    }
+  } else {
+    seg(g.start, (n) => firstOfYear(n, 1), 0, mid, (n) => String(dayParts(n).y), 36);
+    seg(g.start, (n) => firstOfMonth(n, 1), mid, H, (n) => { const p = dayParts(n); return `${MONTHS[p.m]} ${p.y}`; }, 60);
+    // Third line: ISO week number of each week (weeks start on Monday).
+    s += `<line x1="0" y1="${H + 0.5}" x2="${g.width}" y2="${H + 0.5}" class="th-l"/>`;
+    for (let n = g.start; n <= g.end; n++) {
+      if (mondayIndex(n) !== 0) continue;
+      const x = g.x(n);
+      s += `<line x1="${x + 0.5}" y1="${H}" x2="${x + 0.5}" y2="${H + 22}" class="th-l"/>`;
+      s += `<text x="${x + 3.5 * g.dayW}" y="${H + 15}" text-anchor="middle" class="th-t"><title>Week ${isoWeek(n)} · ${dayToDisp(n)} – ${dayToDisp(n + 6)}</title>${isoWeek(n)}</text>`;
+    }
+    // Holidays: small marks at the bottom of the week line (hover shows the name).
+    for (const [n, names] of g.hol) {
+      s += `<rect x="${g.x(n)}" y="${H + 17}" width="${Math.max(3, g.dayW)}" height="5" fill="#D55E00"><title>${esc(dayToDisp(n) + '\n' + names.join('\n'))}</title></rect>`;
+    }
+  }
+  return s;
+}
+
+/** ISO 8601 week number of day n (weeks start on Monday; week 1 contains the first Thursday). */
+function isoWeek(n) {
+  const thursday = n - mondayIndex(n) + 3;
+  return Math.floor((thursday - firstOfYear(thursday)) / 7) + 1;
+}
+
+/**
+ * Background of the timeline body: very light alternating columns (every
+ * second day in week view, every second week in month view) and the public
+ * holidays that are switched on.
+ */
+function backgroundInner(g, height) {
+  let zebra = '', hol = '';
+  for (let n = g.start; n <= g.end; n++) {
+    const odd = g.zoom === 'week' ? (n - g.start) % 2 === 1 : Math.floor((n + 3) / 7) % 2 === 1;  // (n+3)/7 = week count since a Monday
+    if (odd) zebra += `M${g.x(n)} 0h${g.dayW}v${height}h${-g.dayW}z`;
+    if (g.hol.has(n)) hol += `M${g.x(n)} 0h${g.dayW}v${height}h${-g.dayW}z`;
+  }
+  return `<path d="${zebra}" class="zb"/><path d="${hol}" class="hol"/>`;
+}
+
+/** SVG path of vertical grid lines: thin per day (week view) or per week (month view), strong per week/month. */
+function gridPaths(g, height) {
+  let thin = '', strong = '';
+  for (let n = g.start; n <= g.end + 1; n++) {
+    const x = g.x(n) + 0.5;
+    if (g.zoom === 'week') {
+      if (mondayIndex(n) === 0) strong += `M${x} 0V${height}`; else thin += `M${x} 0V${height}`;
+    } else if (dayParts(n).d === 1) strong += `M${x} 0V${height}`;
+    else if (mondayIndex(n) === 0) thin += `M${x} 0V${height}`;
+  }
+  return `<path d="${thin}" class="g1"/><path d="${strong}" class="g2"/>`;
+}
+
+/**
+ * Orthogonal dependency arrow from (x1,y1) to (x2,y2).
+ * d1 = direction in which the line leaves the predecessor (+1 right from its
+ * end, -1 left from its start); d2 = direction in which it enters the
+ * successor (+1 from the left into its start, -1 from the right into its end).
+ */
+function arrowPath(x1, y1, d1, x2, y2, d2, rh) {
+  const a = x1 + d1 * 8;               // first bend, just outside the predecessor
+  const b = x2 - d2 * 8;               // last bend, just before the successor
+  if ((d2 > 0 && a <= b) || (d2 < 0 && a >= b)) return `M${x1} ${y1}H${a}V${y2}H${x2}`;
+  const ym = y2 > y1 ? y2 - rh / 2 : y2 + rh / 2;   // detour along the row boundary
+  return `M${x1} ${y1}H${a}V${ym}H${b}V${y2}H${x2}`;
+}
+
+/**
+ * SVG content of the timeline body for the given rows: grid, row lines,
+ * phase summary bars (phase colour), task bars (one colour, darker part =
+ * % complete), milestones (circle; filled when reached) and dependency arrows.
+ * `markerId` must be unique per SVG (the print view contains several SVGs).
+ */
+function timelineBodyInner(rows, g, rh, markerId, num, interactive = true) {
+  const H = rows.length * rh;
+  let s = `<defs><marker id="${markerId}" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">` +
+    `<path d="M0 0L8 4L0 8z" fill="#4b5563"/></marker></defs>`;
+  s += backgroundInner(g, H);
+  s += gridPaths(g, H);
+  let lines = '';
+  for (let i = 1; i <= rows.length; i++) lines += `M0 ${i * rh - 0.5}H${g.width}`;
+  s += `<path d="${lines}" class="g1"/>`;
+  const pos = new Map();   // task id -> {yc, xs, xe} for the arrows
+  let bars = '';
+  let top = '';            // arrow tips (drag to re-connect) – above bars
+  let hdls = '';           // link handles – topmost
+  rows.forEach((r, i) => {
+    const y = i * rh;
+    if (r.kind === 'phase') {
+      const sm = phaseSummary(r.phase);
+      if (!sm) return;
+      const x = g.x(sm.start), w = Math.max(8, (sm.end - sm.start + 1) * g.dayW);
+      const bh = Math.max(6, Math.round(rh * 0.22)), by = y + Math.round(rh * 0.34);
+      const col = phaseColor(r.phase);
+      const tip = `${num.get(r.phase.id)} ${r.phase.name}\n${dayToDisp(sm.start)} – ${dayToDisp(sm.end)} · ${sm.duration} d · ${sm.percent}%`;
+      bars += `<g class="bar" data-open="${esc(r.phase.id)}"><title>${esc(tip)}</title>` +
+        `<rect x="${x - 4}" y="${y}" width="${w + 8}" height="${rh}" fill="transparent"/>` +
+        `<rect x="${x}" y="${by}" width="${w}" height="${bh}" fill="${col}" rx="1"/>` +
+        `<path d="M${x} ${by + bh}h7l-7 6z M${x + w} ${by + bh}h-7l7 6z" fill="${col}"/></g>`;
+      return;
+    }
+    const t = r.task;
+    const s0 = isoToDay(t.start);
+    const end = taskEndDay(t);
+    if (t.milestone) {
+      const cx = g.x(s0) + g.dayW / 2, cy = y + rh / 2, rr = Math.max(5, Math.round(rh * 0.2));
+      const tip = `${num.get(t.id)} ${t.name}\nMilestone ${dayToDisp(s0)} · ${t.done ? 'reached' : 'not reached'}`;
+      bars += `<g class="bar" data-open="${esc(t.id)}"><title>${esc(tip)}</title>` +
+        `<rect x="${cx - rh / 2}" y="${y}" width="${rh}" height="${rh}" fill="transparent"/>` +
+        `<circle cx="${cx}" cy="${cy}" r="${rr}" class="ms-c ${t.done ? 'ms-done' : 'ms-open'}"/></g>`;
+      return;
+    }
+    const x = g.x(s0);
+    const w = Math.max(8, t.duration * g.dayW);            // minimum 8 px so 1-day tasks stay visible
+    const bh = Math.round(rh * 0.56), by = y + Math.round((rh - bh) / 2);
+    const pw = (w * t.percent) / 100;
+    const tip = `${num.get(t.id)} ${t.name}\n${dayToDisp(s0)} – ${dayToDisp(end)} · ${t.duration} d · ${t.percent}%` +
+      (t.person ? `\nOwner: ${t.person}` : '') + (t.deps.length ? `\nPredecessors: ${predText(t, num)}` : '');
+    bars += `<g class="bar" data-open="${esc(t.id)}"><title>${esc(tip)}</title>` +
+      `<rect x="${x - 6}" y="${y}" width="${w + 12}" height="${rh}" fill="transparent"/>` +
+      `<rect class="bar-bg" x="${x}" y="${by}" width="${w}" height="${bh}" rx="3"/>` +
+      (pw > 0 ? `<rect class="bar-pg" x="${x}" y="${by}" width="${pw}" height="${bh}" rx="3"/>` : '') + `</g>`;
+    // Link handles (shown while the mouse is over the bar, see ui-events): drag from here to another bar.
+    if (interactive) {
+      hdls += `<circle class="hdl" data-id="${esc(t.id)}" data-h="s" cx="${x}" cy="${y + rh / 2}" r="5"><title>Drag onto another task to link from this START</title></circle>` +
+        `<circle class="hdl" data-id="${esc(t.id)}" data-h="e" cx="${x + w}" cy="${y + rh / 2}" r="5"><title>Drag onto another task to link from this FINISH</title></circle>`;
+    }
+    pos.set(t.id, { yc: y + rh / 2, xs: x, xe: x + w });
+  });
+  let arrows = '';
+  for (const r of rows) {
+    if (r.kind !== 'task' || r.task.milestone) continue;
+    const sp = pos.get(r.task.id);
+    if (!sp) continue;
+    for (const dep of r.task.deps) {
+      const pp = pos.get(dep.pred);
+      if (!pp) continue;                   // predecessor hidden (collapsed/filtered/other print page)
+      let x1, d1, x2, d2;
+      switch (dep.type) {
+        case 'SS': x1 = pp.xs; d1 = -1; x2 = sp.xs; d2 = 1; break;
+        case 'FF': x1 = pp.xe; d1 = 1; x2 = sp.xe; d2 = -1; break;
+        case 'SF': x1 = pp.xs; d1 = -1; x2 = sp.xe; d2 = -1; break;
+        default: x1 = pp.xe; d1 = 1; x2 = sp.xs; d2 = 1; // FS
+      }
+      const path = arrowPath(x1, pp.yc, d1, x2, sp.yc, d2, rh);
+      const link = `${esc(r.task.id)}|${esc(dep.pred)}`;
+      arrows += `<path class="arrow" d="${path}" marker-end="url(#${markerId})"/>`;
+      if (interactive) {
+        // Wide invisible line = click target (opens the link editor); circle at the arrow tip = drag to re-connect.
+        arrows += `<path class="arrow-hit" data-link="${link}" d="${path}"><title>${esc(`${num.get(dep.pred)} → ${num.get(r.task.id)} · ${dep.type}${dep.lag ? (dep.lag > 0 ? '+' : '') + dep.lag + 'd' : ''}\nClick to edit · drag the arrow tip to another task`)}</title></path>`;
+        top += `<circle class="ahd" data-link="${link}" data-x1="${x1}" data-y1="${pp.yc}" cx="${x2 - d2 * 10}" cy="${sp.yc}" r="5"><title>Drag onto another task to re-connect this link · click to edit</title></circle>`;
+      }
+    }
+  }
+  // Order: background, arrows, bars, arrow tips, link handles on top. Tips sit 10 px before the
+  // bar edge so they do not collide with the handle on that edge.
+  return s + arrows + bars + top + hdls;
+}
+
+/** The two ↑/↓ buttons of a row. */
+function moveBtns(id) {
+  return `<button data-k="${esc(id)}|up" data-move="up" title="Move up" aria-label="Move up">&#8593;</button>` +
+    `<button data-k="${esc(id)}|down" data-move="down" title="Move down" aria-label="Move down">&#8595;</button>`;
+}
+
+/** HTML of one table row (the timeline part of the row is an empty cell under the SVG). */
+function rowHTML(r, C, num, g) {
+  const tl = `<div class="tlc" style="width:${g.width}px"></div>`;
+  const cell = (w, inner, cls = '', extra = '') => `<div class="cell ${cls}" style="width:${w}px${extra}">${inner}</div>`;
+  if (r.kind === 'phase') {
+    const p = r.phase, id = esc(p.id), sm = phaseSummary(p);
+    return `<div class="row phase${ui.selected === p.id ? ' sel' : ''}" data-row="${id}">` +
+      cell(C.id, `<button class="idbtn" data-k="${id}|id" data-open="${id}" title="Phase details">${num.get(p.id)}</button>`, 'sticky', ';left:0') +
+      cell(C.name, `<button class="tog" data-k="${id}|tog" data-toggle="${id}" aria-expanded="${!p.collapsed}" title="${p.collapsed ? 'Expand' : 'Collapse'} phase">${p.collapsed ? '&#9656;' : '&#9662;'}</button>` +
+        `<input data-k="${id}|name" data-f="name" value="${esc(p.name)}" title="${esc(p.name)}" aria-label="Phase name" autocomplete="off">`,
+        'sticky c-name', `;left:${C.id}px;box-shadow:inset 4px 0 0 ${phaseColor(p)}`) +
+      cell(C.act, moveBtns(p.id), 'c-act') +
+      cell(C.start, sm ? dayToDisp(sm.start) : '', 'muted') +
+      cell(C.end, sm ? dayToDisp(sm.end) : '', 'muted') +
+      cell(C.dur, sm ? sm.duration : '', 'num muted') +
+      cell(C.pct, sm ? `${sm.percent}%` : '', 'num muted') +
+      cell(C.person, '') + cell(C.pred, '') + tl + `</div>`;
+  }
+  const t = r.task, id = esc(t.id), s0 = isoToDay(t.start), auto = !t.milestone && t.deps.length > 0;
+  const input = (f, val, extra = '') => `<input data-k="${id}|${f}" data-f="${f}" value="${esc(val)}" autocomplete="off"${extra}>`;
+  const pt = predText(t, num);
+  return `<div class="row task${ui.selected === t.id ? ' sel' : ''}" data-row="${id}">` +
+    cell(C.id, `<button class="idbtn" data-k="${id}|id" data-open="${id}" title="Task details">${num.get(t.id)}</button>`, 'sticky', ';left:0') +
+    cell(C.name, input('name', t.name, ` title="${esc(t.name)}" aria-label="${t.milestone ? 'Milestone' : 'Task'} name"`), 'sticky c-name', `;left:${C.id}px`) +
+    cell(C.act, moveBtns(t.id), 'c-act') +
+    cell(C.start, input('start', dayToDisp(s0), auto
+      ? (t.snet
+        ? ` class="snet" title="Automatic start, but not earlier than ${dayToDisp(isoToDay(t.snet))} (constraint). Type another date to change it, clear the field to remove it." aria-label="Start (automatic, with constraint)"`
+        : ' title="Automatic start from the predecessors. Typing a date sets a “start no earlier than” constraint." aria-label="Start (automatic)"')
+      : ' title="Start date (DD.MM.YYYY)" aria-label="Start date"')) +
+    cell(C.end, t.milestone ? '<span class="muted">—</span>' : input('end', dayToDisp(taskEndDay(t)), ' title="End date (DD.MM.YYYY)" aria-label="End date"')) +
+    cell(C.dur, t.milestone ? '<span class="muted">0</span>' : input('dur', t.duration, ' inputmode="numeric" aria-label="Duration in days"'), 'num') +
+    cell(C.pct, t.milestone
+      ? `<label class="cbx" title="Milestone reached"><input type="checkbox" data-k="${id}|done" data-f="done"${t.done ? ' checked' : ''} aria-label="Milestone reached"></label>`
+      : input('pct', t.percent, ' inputmode="numeric" aria-label="Percent complete"'), 'num') +
+    cell(C.person, input('person', t.person, ' aria-label="Owner"')) +
+    cell(C.pred, t.milestone ? '<span class="muted">—</span>'
+      : `<button class="predbtn${pt ? '' : ' none'}" data-k="${id}|pred" data-open="${id}" data-deps="1" title="${esc(pt || 'Add a predecessor')}">${esc(pt || '+ add')}</button>`) +
+    tl + `</div>`;
+}
+
+/**
+ * Full re-render of the sheet. Keeps scroll position and keyboard focus,
+ * so editing with Tab from field to field keeps working.
+ */
+function render() {
+  const sc = $('#scroller'), sheet = $('#sheet');
+  const sl = sc.scrollLeft, st = sc.scrollTop;
+  const ae = document.activeElement;
+  let focusKey = pendingFocus;
+  const selectText = !!pendingFocus;
+  if (!focusKey && ae && sheet.contains(ae)) focusKey = ae.dataset.k || null;
+  pendingFocus = null;
+
+  const C = colDefs(), rh = rowHeight(), g = timelineGeom(), rows = visibleRows(), num = numbering();
+  const leftW = C.id + C.name + C.act + C.start + C.end + C.dur + C.pct + C.person + C.pred;
+  const stickyW = C.id + C.name;
+  const totalW = leftW + g.width;
+  lastLayout = { g, C, leftW, stickyW, rh };
+
+  const hc = (w, label, cls = '', extra = '') => `<div class="cell ${cls}" style="width:${w}px${extra}">${label}</div>`;
+  let html = `<div class="hdr" style="width:${totalW}px;height:${g.hdrH}px">` +
+    hc(C.id, '#', 'sticky', ';left:0') + hc(C.name, 'Name', 'sticky c-name', `;left:${C.id}px`) +
+    hc(C.act, 'Move', 'c-act') + hc(C.start, 'Start') + hc(C.end, 'End') + hc(C.dur, 'Days', 'num') +
+    hc(C.pct, '%', 'num') + hc(C.person, 'Owner') + hc(C.pred, 'Predecessors') +
+    `<div class="tlh" style="width:${g.width}px;height:${g.hdrH}px"><svg width="${g.width}" height="${g.hdrH}">${timelineHeaderInner(g)}</svg></div></div>`;
+  html += `<div class="body" style="width:${totalW}px;height:${rows.length * rh}px">` +
+    `<svg class="tl" style="left:${leftW}px" width="${g.width}" height="${rows.length * rh}">${timelineBodyInner(rows, g, rh, 'arrowhead', num)}</svg>` +
+    rows.map((r) => rowHTML(r, C, num, g)).join('') + `</div>`;
+  if (!rows.length) {
+    html += ui.filter.trim()
+      ? `<div class="empty">No task or phase matches “${esc(ui.filter.trim())}”.</div>`
+      : `<div class="empty">No phases or tasks yet. Use <b>+ Phase</b> or <b>+ Task</b> to start, or Menu → <b>Open project</b>.</div>`;
+  }
+  sheet.style.width = `${totalW}px`;
+  sheet.innerHTML = html;
+  sc.scrollLeft = sl;
+  sc.scrollTop = st;
+  if (focusKey) {
+    const el = sheet.querySelector(`[data-k="${CSS.escape(focusKey)}"]`);
+    if (el) {
+      el.focus({ preventScroll: !selectText });
+      if (selectText && typeof el.select === 'function') el.select();
+    }
+  }
+  updateToolbar();
+}
+</script>
+
+<!-- ======================================================================
+     7. UI PRINT: A4 landscape pages
+     ====================================================================== -->
+<script id="ui-print">
+'use strict';
+/*
+ * Browsers cannot split a wide element across several pages by themselves,
+ * so the pages are built here: the chart (as currently shown: zoom, collapsed
+ * phases and search are respected) is cut into page-sized pieces, first
+ * top-to-bottom by rows, then left-to-right by time. Every page repeats the
+ * task table on the left and has a header (project, print date, page x of y)
+ * and a footer describing which rows and dates it contains.
+ * Page = A4 landscape minus 10 mm margins = 277 x 190 mm ≈ 1046 x 716 px.
+ */
+function buildPrint() {
+  const area = $('#printArea');
+  const rows = visibleRows(), num = numbering(), g = timelineGeom();
+  const PW = 1046, PH = 716, RH = 22, HH = g.hdrH, TOP = 30, BOT = 20;
+  const cols = [{ w: 40, t: '#' }, { w: 196, t: 'Name' }, { w: 80, t: 'Start' }, { w: 80, t: 'End' }, { w: 38, t: 'Days' }];
+  const LW = cols.reduce((a, c) => a + c.w, 0);
+  const TW = PW - LW - 1;
+  const perPage = Math.max(1, Math.floor((PH - TOP - BOT - HH - 4) / RH));
+  const rowChunks = Math.max(1, Math.ceil(rows.length / perPage));
+  const colChunks = Math.max(1, Math.ceil(g.width / TW));
+  const total = rowChunks * colChunks;
+  const printed = dayToDisp(todayDay());
+  const head = timelineHeaderInner(g);
+
+  /** Left table for a slice of rows. */
+  const left = (slice) => {
+    let s = `<div class="prw hd" style="height:${HH}px">${cols.map((c) => `<div style="width:${c.w}px">${c.t}</div>`).join('')}</div>`;
+    for (const r of slice) {
+      let vals, cls = '', stripe = '';
+      if (r.kind === 'phase') {
+        const sm = phaseSummary(r.phase);
+        vals = [num.get(r.phase.id), r.phase.name, sm ? dayToDisp(sm.start) : '', sm ? dayToDisp(sm.end) : '', sm ? sm.duration : ''];
+        cls = ' phase';
+        stripe = `box-shadow:inset 3px 0 0 ${phaseColor(r.phase)};`;
+      } else {
+        const t = r.task;
+        vals = [num.get(t.id), t.name, dayToDisp(isoToDay(t.start)), t.milestone ? '—' : dayToDisp(taskEndDay(t)), t.milestone ? '0' : t.duration];
+      }
+      s += `<div class="prw${cls}" style="height:${RH}px">` + vals.map((v, i) =>
+        `<div style="width:${cols[i].w}px;${i === 0 ? stripe : ''}${i === 1 && r.kind === 'task' ? 'padding-left:14px;' : ''}${i === 4 ? 'text-align:right;' : ''}">${esc(v)}</div>`).join('') + `</div>`;
+    }
+    return s;
+  };
+
+  let html = '', k = 0;
+  for (let rc = 0; rc < rowChunks; rc++) {
+    const slice = rows.slice(rc * perPage, (rc + 1) * perPage);
+    const leftHtml = left(slice);
+    for (let cc = 0; cc < colChunks; cc++) {
+      k++;
+      const x0 = cc * TW, w = Math.min(TW, g.width - x0), bh = Math.max(1, slice.length * RH);
+      const d0 = g.start + Math.floor(x0 / g.dayW);
+      const d1 = Math.min(g.end, g.start + Math.ceil((x0 + w) / g.dayW) - 1);
+      html += `<section class="page">
+        <header class="ph"><b>${esc(state.name)}</b><span>Printed ${printed}</span><span>Page ${k} of ${total}</span></header>
+        <div class="pb">
+          <div class="pl" style="width:${LW}px">${leftHtml}</div>
+          <div class="pt" style="width:${w}px">
+            <svg width="${w}" height="${HH}" viewBox="${x0} 0 ${w} ${HH}">${head}</svg>
+            <svg width="${w}" height="${bh}" viewBox="${x0} 0 ${w} ${bh}">${timelineBodyInner(slice, g, RH, `pa${k}`, num, false)}</svg>
+          </div>
+        </div>
+        <footer class="pf">Rows ${slice.length ? rc * perPage + 1 : 0}–${rc * perPage + slice.length} of ${rows.length} · timeline part ${cc + 1} of ${colChunks} (${dayToDisp(d0)} – ${dayToDisp(d1)}) · Gantt Chart Planner</footer>
+      </section>`;
+    }
+  }
+  area.innerHTML = html;
+}
+
+/** Menu → Print / PDF. The browser's print dialog also offers "Save as PDF". */
+function doPrint() {
+  buildPrint();
+  window.print();
+}
+// Ctrl+P / browser menu printing: build the pages just before printing, clean up afterwards.
+window.addEventListener('beforeprint', buildPrint);
+window.addEventListener('afterprint', () => { $('#printArea').innerHTML = ''; });
+</script>
+
+<!-- ======================================================================
+     8. UI EVENTS: toolbar, table editing, keyboard, start-up
+     ====================================================================== -->
+<script id="ui-events">
+'use strict';
+
+/** Synchronises toolbar controls with the state (undo/redo availability, name, zoom, title). */
+function updateToolbar() {
+  $('#bUndo').disabled = !undoStack.length;
+  $('#bRedo').disabled = !redoStack.length;
+  const pn = $('#projName');
+  if (document.activeElement !== pn) pn.value = state.name;
+  $('#zoom').value = ui.zoom;
+  document.title = `${state.name} – Gantt Chart Planner`;
+}
+
+/** Highlights a row without a full re-render (so clicking into a field keeps the caret). */
+function selectRow(id) {
+  ui.selected = id;
+  $$('#sheet .row.sel').forEach((r) => r.classList.remove('sel'));
+  const row = $(`#sheet .row[data-row="${CSS.escape(id)}"]`);
+  if (row) row.classList.add('sel');
+}
+
+/** Scrolls the timeline so that day n is near the left edge (just right of the sticky columns). */
+function scrollToDay(n, smooth) {
+  const L = lastLayout;
+  if (!L) return;
+  const margin = (L.g.zoom === 'week' ? 3 : 10) * L.g.dayW;
+  const left = Math.max(0, L.leftW + L.g.x(n) - L.stickyW - margin);
+  $('#scroller').scrollTo({ left, behavior: smooth ? 'smooth' : 'auto' });
+}
+
+/** Switches week/month zoom and keeps the same date at the left edge of the visible timeline. */
+function setZoom(z) {
+  const sc = $('#scroller'), L = lastLayout;
+  let anchor = null;
+  if (L && sc.scrollLeft + L.stickyW > L.leftW) anchor = L.g.start + (sc.scrollLeft + L.stickyW - L.leftW) / L.g.dayW;
+  ui.zoom = z;
+  render();
+  if (anchor !== null) { const N = lastLayout; sc.scrollLeft = Math.max(0, N.leftW + N.g.x(anchor) - N.stickyW); }
+}
+
+/** Adds a task after the selected task (or at the end of the selected / last phase). */
+function addTask() {
+  let target = null, after = -1;
+  if (ui.selected) {
+    const tl = findTask(ui.selected);
+    if (tl) { target = tl.phase; after = tl.index; }
+    else { const pl = findPhase(ui.selected); if (pl) target = pl.phase; }
+  }
+  let created = null;
+  clearSearch();
+  commit(() => {
+    if (!state.phases.length) state.phases.push(makePhase({ name: 'Phase 1' }));
+    if (!target || !state.phases.includes(target)) target = state.phases[state.phases.length - 1];
+    created = makeTask({ name: 'New task' });
+    if (after >= 0) target.tasks.splice(after + 1, 0, created); else target.tasks.push(created);
+    target.collapsed = false;
+    ui.selected = created.id;
+  });
+  if (created) pendingFocus = `${created.id}|name`;
+}
+
+/** Adds a phase after the selected phase (or after the phase of the selected task), else at the end. */
+function addPhase() {
+  let at = state.phases.length;
+  if (ui.selected) {
+    const pl = findPhase(ui.selected) || (findTask(ui.selected) ? findPhase(findTask(ui.selected).phase.id) : null);
+    if (pl) at = pl.index + 1;
+  }
+  let created = null;
+  clearSearch();
+  commit(() => {
+    created = makePhase({ name: `Phase ${state.phases.length + 1}` });
+    state.phases.splice(at, 0, created);
+    ui.selected = created.id;
+  });
+  if (created) pendingFocus = `${created.id}|name`;
+}
+
+/** Deletes a task and every link pointing to it. */
+function deleteTask(id) {
+  commit(() => {
+    const loc = findTask(id);
+    if (!loc) return false;
+    loc.phase.tasks.splice(loc.index, 1);
+    for (const x of allTasks()) x.deps = x.deps.filter((d) => d.pred !== id);
+    if (ui.selected === id) ui.selected = null;
+  });
+}
+
+/** Deletes a phase with all its tasks and every link pointing to those tasks. */
+function deletePhase(id) {
+  commit(() => {
+    const loc = findPhase(id);
+    if (!loc) return false;
+    const gone = new Set(loc.phase.tasks.map((t) => t.id));
+    state.phases.splice(loc.index, 1);
+    for (const x of allTasks()) x.deps = x.deps.filter((d) => !gone.has(d.pred));
+    if (ui.selected === id || gone.has(ui.selected)) ui.selected = null;
+  });
+}
+
+/** Copies a task right below the original: same data, but WITHOUT links (decision). */
+function duplicateTask(id) {
+  let copyId = null;
+  commit(() => {
+    const loc = findTask(id);
+    if (!loc) return false;
+    const c = JSON.parse(JSON.stringify(loc.task));
+    c.id = newId('t');
+    c.name = `${loc.task.name} (copy)`;
+    c.deps = [];
+    loc.phase.tasks.splice(loc.index + 1, 0, c);
+    ui.selected = c.id;
+    copyId = c.id;
+  });
+  if (copyId) pendingFocus = `${copyId}|name`;
+}
+
+/**
+ * ↑/↓: tasks move within their phase; at the edge of a phase they move into
+ * the previous/next phase. Phases move among phases. Numbers update automatically.
+ */
+function moveRow(id, dir) {
+  const ok = commit(() => {
+    const ph = findPhase(id);
+    const arr = state.phases;
+    if (ph) {
+      const j = ph.index + (dir === 'up' ? -1 : 1);
+      if (j < 0 || j >= arr.length) return false;
+      [arr[ph.index], arr[j]] = [arr[j], arr[ph.index]];
+      return true;
+    }
+    const loc = findTask(id);
+    if (!loc) return false;
+    const { phase, index, task } = loc;
+    const pi = arr.indexOf(phase);
+    if (dir === 'up') {
+      if (index > 0) [phase.tasks[index - 1], phase.tasks[index]] = [phase.tasks[index], phase.tasks[index - 1]];
+      else if (pi > 0) { phase.tasks.splice(index, 1); arr[pi - 1].tasks.push(task); arr[pi - 1].collapsed = false; }
+      else return false;
+    } else {
+      if (index < phase.tasks.length - 1) [phase.tasks[index + 1], phase.tasks[index]] = [phase.tasks[index], phase.tasks[index + 1]];
+      else if (pi < arr.length - 1) { phase.tasks.splice(index, 1); arr[pi + 1].tasks.unshift(task); arr[pi + 1].collapsed = false; }
+      else return false;
+    }
+    return true;
+  });
+  if (ok) { ui.selected = id; pendingFocus = `${id}|${dir}`; }
+}
+
+/** Collapses/expands a phase. Stored in the file, but not an undo step. */
+function toggleCollapse(id) {
+  const loc = findPhase(id);
+  if (!loc) return;
+  loc.phase.collapsed = !loc.phase.collapsed;
+  dirty = true;
+  pendingFocus = `${id}|tog`;
+  requestRender();
+}
+
+/** Empties the search box (used when adding rows so new rows are visible). */
+function clearSearch() { ui.filter = ''; $('#search').value = ''; }
+
+/** Opens the operating system's file dialog to choose a project file. */
+function openFilePicker() { const fi = $('#fileInput'); fi.value = ''; fi.click(); }
+
+/** Shows an "invalid date" message and restores the previous value. */
+function invalidDate(el, previous) {
+  const bad = el.value;
+  el.value = previous;
+  showMessage('Invalid date', `<p>“${esc(bad)}” is not a valid date. Please use DD.MM.YYYY, for example ${dayToDisp(todayDay())}.</p>`);
+}
+
+/** Commits the field that currently has focus (used before shortcuts such as Ctrl+S). */
+function flushActiveEdit() {
+  const el = document.activeElement;
+  if (el && el.matches('#sheet input, #projName')) el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+/** Menu actions. */
+async function menuAction(act) {
+  $('#menu').open = false;
+  switch (act) {
+    case 'open': openFilePicker(); break;
+    case 'save': flushActiveEdit(); exportJSON(); break;
+    case 'csv': exportCSV(); break;
+    case 'xml': exportXML(); break;
+    case 'print': doPrint(); break;
+    case 'help': openHelp(); break;
+    case 'holidays': openHolidaysDialog(); break;
+    case 'new':
+      if (await confirmBox('New empty project?', '<p>The current project will be replaced by an empty one.</p><p class="hint">Save it first if you want to keep it. You can also undo this with Ctrl+Z.</p>', 'Start empty')) {
+        commit(() => { state = { name: 'New project', holidays: defaultHolidays(), phases: [] }; ui.selected = null; });
+        pendingFocus = null;
+        $('#projName').focus();
+        $('#projName').select();
+      }
+      break;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * DRAG-TO-LINK (mouse / pen only; on touch screens the dialogs are used, so
+ * that dragging never interferes with scrolling).
+ *  - Drag a handle (circle at the start or finish of a bar) onto another bar.
+ *    The side you drop on decides the type: finish→start FS, start→start SS,
+ *    finish→finish FF, start→finish SF.
+ *  - Drag the tip of an existing arrow onto another task to re-connect it.
+ * Every drop is checked: no milestones, no link to itself, no loops.
+ * ------------------------------------------------------------------------- */
+let drag = null;
+let suppressClick = false;
+
+/** The task bar under the mouse and which half (start 's' / finish 'e') it is on. */
+function barUnderPointer(e) {
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  const gEl = el && el.closest('svg.tl .bar[data-open]');
+  if (!gEl) return null;
+  const bg = gEl.querySelector('.bar-bg');
+  if (!bg) return null;                                  // phase or milestone: not linkable
+  const r = bg.getBoundingClientRect();
+  return { id: gEl.dataset.open, el: gEl, side: e.clientX < r.left + r.width / 2 ? 's' : 'e' };
+}
+
+/**
+ * Checks and applies a link pred -> succ of the given type as one undo step.
+ * `oldSucc` = the previous successor when an existing arrow is re-connected.
+ * Returns an error text instead of applying when the link is not allowed.
+ */
+function applyLink(pred, succ, type, lag, oldSucc) {
+  if (pred === succ) return 'A task cannot depend on itself.';
+  const p = findTask(pred), sTask = findTask(succ);
+  if (!p || !sTask) return 'Task not found.';
+  if (p.task.milestone || sTask.task.milestone) return 'Milestones cannot have dependencies.';
+  const depsOf = (x) => {
+    let list = x.deps;
+    if (oldSucc && x.id === oldSucc) list = list.filter((k) => k.pred !== pred);
+    if (x.id === succ) {
+      const prev = list.find((k) => k.pred === pred);
+      list = list.filter((k) => k.pred !== pred).concat([{ pred, type, lag: prev ? prev.lag : lag }]);
+    }
+    return list;
+  };
+  const { cycle } = topoOrder(allTasks(), depsOf);
+  if (cycle) {
+    const num = numbering();
+    return `This link would create a loop (${cycle.map((c) => num.get(c)).join(' → ')}), so it was not created.`;
+  }
+  commit(() => { for (const x of allTasks()) if (x.id === succ || x.id === oldSucc) x.deps = depsOf(x); });
+  return null;
+}
+
+/** pointerdown on a handle or an arrow tip starts dragging a link. */
+function startLinkDrag(e) {
+  const h = e.target.closest('.hdl, .ahd');
+  if (!h || e.pointerType === 'touch' || e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const svg = h.ownerSVGElement;
+  if (h.classList.contains('hdl')) {
+    drag = { mode: 'new', pred: h.dataset.id, side: h.dataset.h, x0: Number(h.getAttribute('cx')), y0: Number(h.getAttribute('cy')) };
+  } else {
+    const [succ, pred] = h.dataset.link.split('|');
+    const dep = findTask(succ)?.task.deps.find((k) => k.pred === pred);
+    if (!dep) return;
+    drag = { mode: 'move', pred, oldSucc: succ, side: dep.type[0] === 'F' ? 'e' : 's', lag: dep.lag,
+      x0: Number(h.dataset.x1), y0: Number(h.dataset.y1), sx: e.clientX, sy: e.clientY };
+  }
+  drag.svg = svg;
+  drag.sx = e.clientX; drag.sy = e.clientY; drag.moved = false; drag.target = null;
+  drag.line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  drag.line.setAttribute('class', 'dragline');
+  svg.appendChild(drag.line);
+  window.addEventListener('pointermove', moveLinkDrag);
+  window.addEventListener('pointerup', endLinkDrag);
+  window.addEventListener('pointercancel', endLinkDrag);
+}
+
+/** Follows the mouse with a dashed line, highlights the drop target and scrolls near the edges. */
+function moveLinkDrag(e) {
+  if (!drag) return;
+  if (Math.abs(e.clientX - drag.sx) + Math.abs(e.clientY - drag.sy) > 4) drag.moved = true;
+  const r = drag.svg.getBoundingClientRect();
+  drag.line.setAttribute('d', `M${drag.x0} ${drag.y0}L${e.clientX - r.left} ${e.clientY - r.top}`);
+  if (drag.target) drag.target.el.classList.remove('drop', 'nodrop');
+  drag.target = barUnderPointer(e);
+  if (drag.target) {
+    const ok = drag.target.id !== drag.pred && !dependentsOf(drag.target.id).has(drag.pred);
+    drag.target.el.classList.add(ok ? 'drop' : 'nodrop');
+  }
+  const sc = $('#scroller'), b = sc.getBoundingClientRect();
+  // Auto-scroll when the mouse is close to an edge of the visible chart.
+  if (e.clientX > b.right - 20) sc.scrollLeft += 12;
+  else if (e.clientX < b.left + (lastLayout ? lastLayout.stickyW : 0) + 20) sc.scrollLeft -= 12;
+  if (e.clientY > b.bottom - 20) sc.scrollTop += 10;
+  else if (e.clientY < b.top + (lastLayout ? lastLayout.g.hdrH : 44) + 20) sc.scrollTop -= 10;
+}
+
+/** Drop: creates or re-connects the link (or explains why not). */
+function endLinkDrag(e) {
+  window.removeEventListener('pointermove', moveLinkDrag);
+  window.removeEventListener('pointerup', endLinkDrag);
+  window.removeEventListener('pointercancel', endLinkDrag);
+  if (!drag) return;
+  const dg = drag;
+  drag = null;
+  dg.line.remove();
+  if (dg.target) dg.target.el.classList.remove('drop', 'nodrop');
+  if (!dg.moved) {                                   // a plain click on an arrow tip: open the editor
+    if (dg.mode === 'move' && e.type === 'pointerup') { suppressClick = true; openLinkDialog(dg.oldSucc, dg.pred); }
+    return;
+  }
+  suppressClick = true;
+  setTimeout(() => { suppressClick = false; }, 300);
+  if (e.type !== 'pointerup') return;
+  const t = barUnderPointer(e);
+  if (!t) return;                                    // dropped on empty space: nothing happens
+  const type = (dg.side === 'e' ? 'F' : 'S') + (t.side === 's' ? 'S' : 'F');
+  const problem = applyLink(dg.pred, t.id, type, dg.mode === 'move' ? dg.lag : 0, dg.mode === 'move' ? dg.oldSucc : null);
+  if (problem) showMessage('Link not possible', `<p>${esc(problem)}</p>`);
+}
+
+/** Wires up every event handler and shows the first screen. */
+function init() {
+  sampleProject('My Project');
+  schedule();
+  const sheet = $('#sheet');
+
+  // ---- toolbar ----
+  $('#bAddPhase').addEventListener('click', addPhase);
+  $('#bAddTask').addEventListener('click', addTask);
+  $('#bUndo').addEventListener('click', undo);
+  $('#bRedo').addEventListener('click', redo);
+  $('#zoom').addEventListener('change', (e) => setZoom(e.target.value));
+  $('#bToday').addEventListener('click', () => scrollToDay(todayDay(), true));
+  $('#search').addEventListener('input', (e) => { ui.filter = e.target.value; requestRender(); });
+  const pn = $('#projName');
+  pn.addEventListener('change', () => commit(() => { state.name = pn.value.trim() || 'Untitled project'; }));
+  pn.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); pn.dispatchEvent(new Event('change')); pn.blur(); }
+    if (e.key === 'Escape') { pn.value = state.name; pn.blur(); }
+  });
+  $$('#menu [data-act]').forEach((b) => b.addEventListener('click', () => menuAction(b.dataset.act)));
+  document.addEventListener('click', (e) => { const m = $('#menu'); if (m.open && !m.contains(e.target)) m.open = false; });
+  $('#fileInput').addEventListener('change', (e) => { const file = e.target.files && e.target.files[0]; if (file) importFile(file); });
+
+  // ---- table editing (event delegation: one listener for all rows) ----
+  sheet.addEventListener('change', (e) => {
+    const el = e.target;
+    const row = el.closest('.row');
+    if (!row || !el.dataset.f) return;
+    const id = row.dataset.row, f = el.dataset.f;
+    if (row.classList.contains('phase')) {
+      if (f === 'name') commit(() => { const p = findPhase(id); if (!p) return false; p.phase.name = el.value.trim() || 'Untitled phase'; });
+      return;
+    }
+    const loc = findTask(id);
+    if (!loc) return;
+    const t = loc.task;
+    switch (f) {
+      case 'name': commit(() => { t.name = el.value.trim() || 'Untitled task'; }); break;
+      case 'person': commit(() => { t.person = el.value.trim(); }); break;
+      case 'start': {
+        if (t.deps.length && !t.milestone) {
+          // Linked task: typing a date sets "start no earlier than", an empty field removes it.
+          if (!el.value.trim()) { commit(() => { delete t.snet; }); return; }
+          const c = dispToDay(el.value);
+          if (isNaN(c)) { invalidDate(el, dayToDisp(isoToDay(t.start))); return; }
+          commit(() => { t.snet = dayToIso(c); });
+          return;
+        }
+        const n = dispToDay(el.value);
+        if (isNaN(n)) { invalidDate(el, dayToDisp(isoToDay(t.start))); return; }
+        commit(() => { t.start = dayToIso(n); });
+        break;
+      }
+      case 'end': {
+        const n = dispToDay(el.value);
+        if (isNaN(n)) { invalidDate(el, dayToDisp(taskEndDay(t))); return; }
+        commit(() => { t.duration = Math.max(1, n - isoToDay(t.start) + 1); });   // end before start -> 1 day
+        break;
+      }
+      case 'dur': commit(() => { t.duration = clampInt(el.value, 1, 100000, t.duration); }); break;
+      case 'pct': commit(() => { t.percent = clampInt(el.value, 0, 100, t.percent); }); break;
+      case 'done': commit(() => { t.done = el.checked; }); break;
+    }
+  });
+  sheet.addEventListener('keydown', (e) => {
+    const el = e.target;
+    if (!el.matches('input:not([type=checkbox])')) return;
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); el.dispatchEvent(new Event('change', { bubbles: true })); }
+    if (e.key === 'Escape') { el.value = el.defaultValue; }
+  });
+  sheet.addEventListener('click', (e) => {
+    if (suppressClick) { suppressClick = false; return; }       // the click that ends a drag
+    const lk = e.target.closest('[data-link]');
+    if (lk) { const [succ, pred] = lk.dataset.link.split('|'); openLinkDialog(succ, pred); return; }
+    const tg = e.target.closest('[data-toggle]');
+    if (tg) { selectRow(tg.dataset.toggle); toggleCollapse(tg.dataset.toggle); return; }
+    const mv = e.target.closest('[data-move]');
+    if (mv) { moveRow(mv.closest('.row').dataset.row, mv.dataset.move); return; }
+    const op = e.target.closest('[data-open]');
+    if (op) { selectRow(op.dataset.open); openDetails(op.dataset.open, op.dataset.deps === '1'); return; }
+    const row = e.target.closest('.row');
+    if (row) selectRow(row.dataset.row);
+  });
+  sheet.addEventListener('pointerdown', startLinkDrag);
+  // Show the link handles of the bar under the mouse (also while the mouse is on a handle).
+  sheet.addEventListener('pointerover', (e) => {
+    if (e.pointerType === 'touch' || drag) return;
+    const b = e.target.closest('svg.tl .bar[data-open], svg.tl .hdl');
+    const id = b ? (b.dataset.open || b.dataset.id) : null;
+    $$('#sheet .hdl.show').forEach((h) => { if (h.dataset.id !== id) h.classList.remove('show'); });
+    if (id) $$(`#sheet .hdl[data-id="${CSS.escape(id)}"]`).forEach((h) => h.classList.add('show'));
+  });
+  sheet.addEventListener('focusin', (e) => { const row = e.target.closest('.row'); if (row && ui.selected !== row.dataset.row) selectRow(row.dataset.row); });
+
+  // ---- keyboard shortcuts ----
+  document.addEventListener('keydown', (e) => {
+    const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    if (document.querySelector('dialog[open]')) {
+      if (mod && key === 's') e.preventDefault();          // never open the browser's "Save page" over a dialog
+      return;
+    }
+    const typing = e.target.matches('input:not([type=checkbox]):not([readonly]), textarea');
+    if (mod && !e.altKey && key === 's') { e.preventDefault(); flushActiveEdit(); exportJSON(); return; }
+    if (mod && !e.altKey && key === 'z' && !e.shiftKey) { if (typing) return; e.preventDefault(); undo(); return; }
+    if (mod && !e.altKey && (key === 'y' || (key === 'z' && e.shiftKey))) { if (typing) return; e.preventDefault(); redo(); return; }
+    if (e.altKey && !mod && e.code === 'KeyN') { e.preventDefault(); flushActiveEdit(); addTask(); }
+  });
+
+  // ---- page life-cycle ----
+  // Warn before leaving with unsaved changes (the only safety net without auto-save).
+  window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+  // Re-render on resize only if the column layout really changes. (On phones the
+  // on-screen keyboard fires resize events; re-rendering then would close it.)
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (!lastLayout || JSON.stringify(colDefs()) !== JSON.stringify(lastLayout.C) || rowHeight() !== lastLayout.rh) render();
+    }, 150);
+  });
+
+  render();
+  scrollToDay(todayDay(), false);   // decision: open on the current week
+  openWelcome();
+}
+
+init();
+</script>
+</body>
+</html>
