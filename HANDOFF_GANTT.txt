@@ -1,0 +1,74 @@
+HANDOFF – Gantt Chart Planner (v3.0 predana)
+Različica predaje: 4.0
+Posodobljeno: 2026-09-24 00:10 (Europe/Ljubljana)
+
+Za nov pogovor priloži: gantt-planner.html (v3.0) + ta dokument.
+Delovni prostor seje (bak/, qa/*.py, SPEC_V3.md) se NE prenese.
+
+=== PRAVILA UPORABNIKA (kratko) ===
+Slovenščina, nevtralen ton; načrt pred izvedbo + čakanje na potrditev; vrstica
+strošek/model/effort na začetku; tveganje stiskanja konteksta; verzioniranje;
+glosar EN/DE/FR/IT; ocena tveganj; 3 odebeljena vprašanja; "ne vem"; PREDPOSTAVKA;
+delegiranje na podagente (najcenejši zadosten model); ta .txt posodobi ob vsakem odgovoru.
+Vmesnik aplikacije je v angleščini. Primeri: farmacevtske strojne inštalacije (brez imena podjetja).
+
+=== STANJE ===
+- gantt-planner.html v3.0: 4306 vrstic, 217.287 B, format JSON 1.2 (odpre 1.0/1.1/1.2).
+- Faze: 1–7 opravljeno, 8 (gradnja v3.0) opravljeno razen K6, 9 (QA) opravljeno v Chromiumu.
+- Safari/iOS za v2.0 in v3.0: NI preverjeno (ne vem).
+- Pravi izbirniki map/datotek (File System Access API) in dovoljenja OS: NI preverjeno
+  (headless test z lažno implementacijo) -> preveri uporabnik v Chrome/Edge.
+
+=== V3.0 – KAJ JE NOVO ===
+K1 Format 1.2: links[], attachments[{name,path,added}], folder (naloga/faza), attachRoot.
+   Pomočniki: isSafeUrl, isSafeRelPath (tudi rezervirana imena Windows), validateLinksField,
+   validateAttachmentsField, validateFolderField, hasLinksOrAttachments.
+   CSV/XML izvoz ne vsebujeta povezav/priponk -> opozorilo.
+K2 Črta za danes (#d00, 2 px, pointer-events:none), rdeča oznaka dneva v glavi, utrip ob
+   Today (prefers-reduced-motion upoštevan), tudi v tisku.
+K3 "What next?" (#bWhatNext; pod 420 px ikona ⏭): drivingPred, firstSuccessor,
+   phaseDrivingPred, phaseFirstSuccessor, openWhatNext, walkTo, ensureVisible.
+   Odločitve: poudarjeni so vsi trije (pred/izbrana/nasl.) + 2 puščici; skrita vrstica se
+   samodejno razširi / počisti iskanje; pri fazi odločilna ZUNANJA povezava najzgodnejše naloge.
+K4 Spletne povezave: razdelek "Links" v obeh oknih, 🔗 v celici imena, 1 povezava -> odpre,
+   več -> seznam. Samo https/http/mailto.
+K5 Priponke, način C (datoteke samo na disku, v JSON relativna pot):
+   Projekt_Attachments/<št. ob nastanku> <ime>/datoteka + _snapshot_YYYY-MM-DD.png
+   Chrome/Edge: izbira projektne mape enkrat na sejo, aplikacija sama piše.
+   Safari/Firefox: prenos posnetka + navodilo, kam premakniti; odpiranje prek relativne povezave.
+   "Update snapshot" doda nov posnetek, stari ostane. "Add file…" = en korak undo.
+   Odstranitev s seznama NE briše datotek. Manjkajoča datoteka -> "missing" + "Re-select…".
+   Posnetek: blok <script id="snapshot"> (buildSnapshotPNG, buildSnapshotSVG, snapshotFileName),
+   SVG -> canvas -> PNG, brez foreignObject.
+   Blok <script id="attachments">: safeName, peekAttachRoot, peekItemFolder, attachAddFilesHandle,
+   attachAddFilesManual, attachUpdateSnapshot, attachOpen, attachReselect, attachSectionHTML.
+
+=== ODLOŽENO (v načrtu, NI v v3.0) ===
+K6 Kalkulator delovnih dni – na zahtevo uporabnika odložen. Sprejeta specifikacija:
+- Gumb 🧮 v orodni vrstici odpre vrstico (ne modalno): Start (privzeto danes) · N · End ·
+  [x] skip weekends · [x] skip holidays (holidayIndex, upošteva izklopljene praznike).
+- Štetje "b": začetni dan NE šteje. Naprej: End = N-ti štet dan PO Start (N=0 -> End=Start).
+  Nazaj: N = št. štetih dni d, Start < d <= End. Primer: pet + 2, brez vikendov -> tor.
+- Izpis preskočenih vikendov in imen praznikov; samo orodje, ne spreminja projekta.
+- Predlagan izvajalec: Haiku / medium.
+
+=== QA (Playwright, Chromium) ===
+k1 format, k2 today, k3 what-next, k4 links, k5b snapshot, k5a attachments (56+ preverb),
+k7_regression (58 preverb v2.0 funkcij + navzkrižne) – vse uspešno, brez napak v konzoli.
+Pregled kode: 3 manjše ugotovitve (try/catch pri listDirNames, rezervirana imena Windows v
+safeName in isSafeRelPath) – odpravljene.
+
+=== PASTI ===
+- Write pretvori ﻿ v pravi BOM -> uporabi Python.
+- Ločnice vrstic na celicah; konice .ahd 10 px pred robom.
+- Dotik: vrstica 45 px, pisava 16 px, gumbi >= 44 px. Alt+N namesto Ctrl+N.
+- Brez CDN, brez localStorage.
+- Safari nima showDirectoryPicker; Finder pri istoimenski mapi ZAMENJA -> ni ZIP-a.
+- Ali Safari iz file:// odpre relativno povezavo do priponke: ne vem.
+- Vlečenje e-pošte iz Outlooka v brskalnik: ne vem; zanesljivo = shrani .msg/.eml.
+- Undo ima 10 korakov; vsaka akcija = en commit.
+
+=== NASLEDNJI KORAKI ===
+1. Uporabnik preizkusi v3.0 v Safariju (macOS) in Chrome/Edge (priponke z mapo).
+2. Po želji: K6 kalkulator delovnih dni.
+3. Pozneje: trajanje v delovnih dneh (kot MS Project), prazniki CH/DE, preverba XML v MS Project.

@@ -7,7 +7,7 @@
 <title>Gantt Chart Planner</title>
 <!--
 ==============================================================================
-  Gantt Chart Planner — version 2.0
+  Gantt Chart Planner — version 3.0
   Author: Matej Barukčić, 2026. For personal use.
 
   WHAT THIS IS
@@ -35,19 +35,38 @@
       5. ui-dialogs      modal dialogs (message, task, phase, help, welcome)
       6. ui-render       table + timeline (SVG) rendering
       7. ui-print        A4-landscape print layout split across several pages
+      7b. snapshot       stand-alone SVG/PNG snapshot image for attachments (K5)
+      7c. attachments    files-on-disk attachments: folders, copy/open/re-select (K5)
       8. ui-events       toolbar, keyboard shortcuts, start-up
 
-  PROJECT FILE FORMAT (JSON, version "1.1"; files of version 1.0 still open)
+  PROJECT FILE FORMAT (JSON, version "1.2"; files of major version 1
+  (1.0, 1.1, 1.2) still open; fields missing in older files default to
+  empty)
     {
-      "version": "1.1",                 required, major version must be 1
+      "version": "1.2",                 required, major version must be 1
       "holidays": { "countries": ["SI"], "off": ["SI:2026-12-26"] },
                                         shown public holidays (SI Slovenia, US United
                                         States) and the ones switched off, per date
       "app": "Gantt Chart Planner",     informative
       "name": "My Project",             project name (also the page title)
       "exported": "2026-09-23",         informative (date of export)
+      "attachRoot": "Project_Attachments", optional, set once (see K5), the
+                                        folder (next to this file) that holds
+                                        all attachments
       "phases": [
         { "id": "p1", "name": "Planning", "collapsed": false,
+          "links": [ { "label": "Charter", "url": "https://..." } ],
+                                        optional web links (https:, http: or
+                                        mailto:; label max. 100 characters)
+          "attachments": [ { "name": "Charter.pdf",
+              "path": "Project_Attachments/1 Planning/Charter.pdf",
+              "added": "2026-09-23" } ],
+                                        optional files kept on disk next to
+                                        this file (see K5); "path" is relative,
+                                        "/" separators, no "..", no leading "/"
+          "folder": "Project_Attachments/1 Planning", optional, subfolder
+                                        assigned once when the first
+                                        attachment is added, never renamed
           "tasks": [
             { "id": "t1", "name": "Kick-off", "milestone": true,
               "start": "2026-09-21",   ISO date YYYY-MM-DD
@@ -57,11 +76,16 @@
               "person": "",            owner (free text)
               "note": "",              max. 200 characters
               "deps": [ { "pred": "t0", "type": "FS", "lag": 0 } ],
-              "snet": "2026-10-01"     optional "Start No Earlier Than" of a linked task
+              "snet": "2026-10-01",    optional "Start No Earlier Than" of a linked task
+              "links": [ ... ],        optional, same shape as on a phase
+              "attachments": [ ... ],  optional, same shape as on a phase
+              "folder": "Project_Attachments/1.2 FAT" optional, same rule as on a phase
             } ] } ] }
     Dependency types: FS finish-to-start, SS start-to-start,
     FF finish-to-finish, SF start-to-finish. "lag" is in calendar days,
     negative values are a lead.
+    "links" and "attachments" are kept only in this JSON format; CSV and
+    MS Project XML export ignore them.
 ==============================================================================
 -->
 <style>
@@ -131,6 +155,13 @@ kbd { font: .85em ui-monospace, SFMono-Regular, Consolas, monospace; border: 1px
 #search { flex: 1 1 110px; min-width: 0; min-height: var(--btn); border: 1px solid var(--line);
   border-radius: 6px; padding: 0 8px; background: #fff; }
 #zoom { min-height: var(--btn); border: 1px solid var(--line); border-radius: 6px; background: #fff; padding: 0 6px; }
+.wn-btn { flex: none; }
+.wn-btn .wn-btn-icon { display: none; font-size: 1.15em; }
+/* Narrow phones: shrink to an icon-only button (aria-label/title still give it a name). */
+@media (max-width: 420px) {
+  .wn-btn .wn-btn-full { display: none; }
+  .wn-btn .wn-btn-icon { display: inline; }
+}
 .menu { position: relative; }
 .menu > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
   min-height: var(--btn); padding: 0 12px; border: 1px solid var(--line); border-radius: 6px;
@@ -194,6 +225,14 @@ svg.tl .bar { pointer-events: auto; cursor: pointer; }
 .predbtn { width: 100%; justify-content: flex-start !important; padding: 0 6px !important; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; display: block !important; text-align: left; }
 .predbtn.none { color: var(--muted) !important; }
+/* Small icon(s) in the name cell (K4: link icon; K5 adds an attachment icon the same way). */
+.item-icons { display: flex; flex: none; align-items: center; gap: 2px; }
+.icobtn { flex: none; width: 22px !important; height: 22px !important; min-height: 0; min-width: 0; border-radius: 4px; font-size: .92em;
+  line-height: 1; color: var(--muted); display: flex; align-items: center; justify-content: center; }
+.icobtn:hover { background: var(--sel); color: var(--fg); }
+/* Attachment icon (K5) shows a count next to it, so it is wider than the fixed-square link icon. */
+.icobtn.cnt { width: auto !important; padding: 0 5px !important; gap: 2px; }
+@media (pointer: coarse) { .icobtn { width: 32px !important; height: 32px !important; font-size: 1.02em; } }
 .cbx { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; cursor: pointer; }
 .cbx input { width: 18px; height: 18px; margin: 0; }
 .muted { color: var(--muted); }
@@ -230,6 +269,23 @@ svg.tl .bar.drop .bar-bg { stroke: var(--accent); stroke-width: 2.5; }
 svg.tl .bar.nodrop .bar-bg { stroke: var(--danger); stroke-width: 2.5; }
 /* A linked task with a "start no earlier than" constraint: orange mark on its start field. */
 .cell input.snet { box-shadow: inset 3px 0 0 #E69F00; }
+/* "What next?" dialog (K3): everything except the predecessor/selected/successor and their two arrows is dimmed. */
+svg.tl .bar.wn-dim, svg.tl .arrow.wn-dim { opacity: .25; }
+/* Today line: red vertical line across the timeline. */
+.today-line { stroke: #d00; stroke-width: 2; pointer-events: none; }
+/* Today label: small red pill with white text, positioned in the day-number row. */
+.today-label-bg { fill: #d00; rx: 3; ry: 3; }
+.today-label { fill: #fff; font-weight: 700; font-size: 10px; text-anchor: middle; }
+/* Blink animation for the today line on click. */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+svg.tl .today-line.blink { animation: blink 0.4s ease-in-out 3; }
+/* With reduced motion preference, no animation. */
+@media (prefers-reduced-motion: reduce) {
+  svg.tl .today-line.blink { animation: none; }
+}
 
 /* =============================================================================
    DIALOGS (native <dialog>, always modal)
@@ -263,10 +319,30 @@ dialog::backdrop { background: rgba(15, 23, 42, .45); }
 .dlg .pick-in { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; min-height: 0; padding: 0;
   margin: 0; border: none; cursor: pointer; }
 .pick.off { opacity: .4; pointer-events: none; }
-fieldset.deps { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px 4px; margin: 0 0 6px; min-width: 0; }
-fieldset.deps legend { font-size: .9em; color: var(--muted); padding: 0 4px; }
+fieldset.deps, fieldset.itemsec { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px 4px; margin: 0 0 6px; min-width: 0; }
+fieldset.deps legend, fieldset.itemsec legend { font-size: .9em; color: var(--muted); padding: 0 4px; }
 .deprow { display: grid; grid-template-columns: minmax(0, 1fr) 72px 76px var(--btn); gap: 6px; margin-bottom: 6px; align-items: center; }
 .deprow button { padding: 0; }
+/* Links section (K4) - the same row/fieldset pattern K5 reuses for Attachments. */
+.linkrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) var(--btn); gap: 6px; margin-bottom: 6px; align-items: center; }
+.linkrow button { padding: 0; }
+ul.linklist { margin: 0 0 10px; padding-left: 22px; }
+ul.linklist li { margin-bottom: 6px; }
+ul.linklist a { color: var(--accent); word-break: break-word; }
+/* Attachments section (K5) - list rows with name/date/actions; reuses fieldset.itemsec above. */
+.atc-btns { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 8px; }
+.atc-btns button { flex: none; }
+.atcrow { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid var(--grid); }
+.atcrow:last-child { border-bottom: none; margin-bottom: 2px; }
+.atc-name { flex: 1 1 140px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .95em; }
+.atc-date { color: var(--muted); font-size: .85em; white-space: nowrap; flex: none; }
+.atc-acts { display: flex; gap: 6px; flex: none; }
+.atc-acts button, .atc-acts a { min-height: 30px; padding: 0 9px; font-size: .85em; }
+.atc-acts a { display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line);
+  border-radius: 6px; color: var(--accent); text-decoration: none; background: #fff; }
+.atc-acts a:hover { background: var(--hover); }
+.atc-flag { color: var(--danger); font-size: .8em; font-weight: 700; text-transform: uppercase; flex: none; }
+.atc-missing .atc-name { color: var(--danger); }
 .errs { margin: 0 0 10px; padding-left: 22px; max-height: 45vh; overflow: auto; }
 .errs li { margin-bottom: 4px; }
 .errs code, pre { font: .85em ui-monospace, SFMono-Regular, Consolas, monospace; }
@@ -286,6 +362,22 @@ dl.ex dd { margin: 1px 0 0 0; color: var(--muted); }
 .holi label.hr input { width: 18px; height: 18px; flex: none; }
 .holi .hd { font-variant-numeric: tabular-nums; min-width: 92px; }
 .holi .wd { color: var(--muted); min-width: 30px; }
+
+/* "What next?" dialog (K3): predecessor / selected / successor boxes. */
+.wn-row { display: flex; gap: 10px; align-items: stretch; margin: 4px 0 4px; }
+.wn-box { flex: 1 1 0; min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--head); }
+.wn-box.wn-self { background: #fff; border-color: var(--accent); border-width: 2px; }
+.wn-box.wn-click { cursor: pointer; background: #fff; }
+.wn-box.wn-click:hover { border-color: var(--accent); background: var(--sel); }
+.wn-box.wn-none { display: flex; align-items: center; justify-content: center; text-align: center; color: var(--muted); font-style: italic; }
+.wn-role { font-size: .78em; text-transform: uppercase; letter-spacing: .02em; color: var(--muted); margin-bottom: 2px; }
+.wn-num { font-weight: 650; }
+.wn-kind { font-weight: 400; color: var(--muted); font-size: .85em; }
+.wn-name { margin: 2px 0; overflow-wrap: anywhere; }
+.wn-span, .wn-meta { font-size: .88em; color: var(--muted); }
+.wn-link { margin-top: 4px; font-size: .88em; font-weight: 650; color: var(--fg); }
+.wn-note { margin-top: 2px; }
+@media (max-width: 600px) { .wn-row { flex-direction: column; } }
 
 /* =============================================================================
    PRINT (A4 landscape, several pages when the chart is wide or long).
@@ -320,6 +412,9 @@ dl.ex dd { margin: 1px 0 0 0; color: var(--muted); }
 <div id="app">
   <header id="toolbar">
     <input id="projName" aria-label="Project name" title="Project name (also used as the file name)" autocomplete="off">
+    <button id="bWhatNext" class="wn-btn" title="What do I do next?" aria-label="What do I do next?">
+      <span class="wn-btn-full">What next?</span><span class="wn-btn-icon" aria-hidden="true">&#9197;</span>
+    </button>
     <details class="menu" id="menu">
       <summary aria-label="Menu">&#9776; Menu</summary>
       <div class="menu-pop" role="menu">
@@ -359,6 +454,10 @@ dl.ex dd { margin: 1px 0 0 0; color: var(--muted); }
 <!-- Hidden file picker used by "Open project". Kept off-screen instead of
      display:none, because some mobile browsers refuse to open hidden pickers. -->
 <input type="file" id="fileInput" accept=".json,application/json" style="position:fixed;left:-9999px;top:0;opacity:0" tabindex="-1" aria-hidden="true">
+<!-- Hidden file picker used by attachments (K5) when the File System Access API is not
+     available (Safari/Firefox), or as a fallback for showOpenFilePicker. Reused for both
+     "Add file..." (multiple) and "Re-select..." (only the first chosen file is used). -->
+<input type="file" id="attachFileInput" multiple style="position:fixed;left:-9999px;top:0;opacity:0" tabindex="-1" aria-hidden="true">
 
 <!-- ======================================================================
      1. CORE UTILITIES
@@ -482,6 +581,50 @@ function download(filename, text, mime) {
 /** Tiny DOM helpers. */
 function $(sel, root = document) { return root.querySelector(sel); }
 function $$(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
+
+/** Protocols allowed for a web link (format 1.2, case-insensitive). */
+const SAFE_URL_PROTOCOLS = ['https:', 'http:', 'mailto:'];
+
+/**
+ * True when `url` is an absolute URL using one of `SAFE_URL_PROTOCOLS`
+ * (decision: never render/open "javascript:", "data:" or similar).
+ */
+function isSafeUrl(url) {
+  if (typeof url !== 'string' || !url.trim()) return false;
+  let proto;
+  try { proto = new URL(url).protocol.toLowerCase(); }
+  catch { return false; }
+  return SAFE_URL_PROTOCOLS.includes(proto);
+}
+
+/**
+ * Windows-reserved device names (case-insensitive, regardless of any
+ * extension): CON, PRN, AUX, NUL, COM1-9, LPT1-9. Used both to keep a
+ * generated attachment folder/file name usable on Windows (`safeName`) and
+ * to reject a hand-edited path that uses one (`isSafeRelPath`).
+ */
+const RESERVED_WIN_NAMES = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+
+/**
+ * True when `p` is a safe relative attachment/folder path (format 1.2):
+ * text, "/" as the only separator, no leading "/", no ".." or "." segment,
+ * no empty segment, no Windows drive letter such as "C:", no segment whose
+ * base name (before the first dot) is a Windows-reserved device name, and no
+ * segment ending in a space or a dot (both invalid on Windows).
+ */
+function isSafeRelPath(p) {
+  if (typeof p !== 'string' || !p.trim()) return false;
+  if (p.includes('\\')) return false;
+  if (p.startsWith('/')) return false;
+  if (/^[A-Za-z]:/.test(p)) return false;
+  const segs = p.split('/');
+  return segs.every((s) => {
+    if (s === '' || s === '.' || s === '..') return false;
+    if (/[ .]$/.test(s)) return false;
+    if (RESERVED_WIN_NAMES.test(s.split('.')[0])) return false;
+    return true;
+  });
+}
 </script>
 
 <!-- ======================================================================
@@ -610,13 +753,15 @@ function holidayIndex(from, to) {
 'use strict';
 
 /** Version written into every saved file. Files with a different MAJOR version are refused. */
-const FILE_VERSION = '1.1';
+const FILE_VERSION = '1.2';
 /** Undo depth (decision: 10 steps; an import counts as one step). */
 const UNDO_LIMIT = 10;
 /** Above this many tasks a one-time, soft performance hint is shown (no hard limit). */
 const LARGE_PROJECT = 100;
 /** Maximum length of a task note. */
 const NOTE_MAX = 200;
+/** Maximum length of a web link's label (format 1.2). */
+const LINK_LABEL_MAX = 100;
 /** Supported dependency types. */
 const DEP_TYPES = ['FS', 'SS', 'FF', 'SF'];
 /**
@@ -627,8 +772,11 @@ const DEP_TYPES = ['FS', 'SS', 'FF', 'SF'];
 const PALETTE = ['#0072B2', '#E69F00', '#009E73', '#CC79A7', '#56B4E9', '#D55E00', '#F0E442'];
 
 /**
- * The whole project. Shape: { name, phases: [ { id, name, collapsed, tasks: [task] } ] }
- * task: { id, name, milestone, start 'YYYY-MM-DD', duration, percent, done, person, note, deps: [{pred, type, lag}] }
+ * The whole project. Shape: { name, attachRoot?, phases: [ { id, name, collapsed, links, attachments, folder?, tasks: [task] } ] }
+ * task: { id, name, milestone, start 'YYYY-MM-DD', duration, percent, done, person, note,
+ *   deps: [{pred, type, lag}], links: [{label, url}], attachments: [{name, path, added}], folder? }
+ * "links" and "attachments" are always arrays (empty when unused, format 1.2); "folder" and the
+ * project's "attachRoot" are only ever present once an attachment has actually been filed (see K5).
  */
 let state = null;
 /** Undo/redo stacks hold JSON snapshots of `state`. */
@@ -668,12 +816,12 @@ function syncIdCounter() {
 /** Factory for a task with sensible defaults (starts today, 5 days). */
 function makeTask(o = {}) {
   return { id: newId('t'), name: 'New task', milestone: false, start: dayToIso(todayDay()), duration: 5,
-    percent: 0, done: false, person: '', note: '', deps: [], ...o };
+    percent: 0, done: false, person: '', note: '', deps: [], links: [], attachments: [], ...o };
 }
 
 /** Factory for an empty phase. */
 function makePhase(o = {}) {
-  return { id: newId('p'), name: 'New phase', collapsed: false, tasks: [], ...o };
+  return { id: newId('p'), name: 'New phase', collapsed: false, tasks: [], links: [], attachments: [], ...o };
 }
 
 /** All tasks of all phases in display order. */
@@ -692,6 +840,12 @@ function findTask(id) {
 function findPhase(id) {
   const i = state.phases.findIndex((p) => p.id === id);
   return i >= 0 ? { phase: state.phases[i], index: i } : null;
+}
+
+/** The phase right before (dir -1) or after (dir 1) this one, or null. */
+function siblingPhase(id, dir) {
+  const loc = findPhase(id);
+  return loc ? state.phases[loc.index + dir] || null : null;
 }
 
 /**
@@ -960,6 +1114,110 @@ function dependentsOf(id) {
   }
   return out;
 }
+
+/*
+ * "What do I do next" (K3): reusable, pure lookups that mirror schedule()'s
+ * own rules, so the dialog always agrees with the chart. Milestones never
+ * carry these links (see schedule()/validateProject), so they simply come
+ * back as "no predecessor" / "no successor".
+ */
+
+/**
+ * The DRIVING predecessor of a task: among its dependency links, the one
+ * whose constraint (depConstraint) is the largest, i.e. the one that
+ * actually produced the task's scheduled start (ties -> first in `deps`,
+ * same as schedule()). Returns null when the task has no usable link.
+ * `snetActive` is true when "Start no earlier than" is at least as large as
+ * that link's constraint, meaning the constraint (also) decided the start.
+ */
+function drivingPred(taskId) {
+  const loc = findTask(taskId);
+  if (!loc || !loc.task.deps.length) return null;
+  const t = loc.task;
+  const byId = new Map(allTasks().map((x) => [x.id, x]));
+  let dep = null, val = -Infinity;
+  for (const d of t.deps) {
+    const p = byId.get(d.pred);
+    if (!p) continue;
+    const c = depConstraint(d, p, t.duration);
+    if (c > val) { val = c; dep = d; }
+  }
+  if (!dep) return null;
+  const snetDay = isoToDay(t.snet);
+  return { dep, pred: byId.get(dep.pred), viaSnet: !isNaN(snetDay) && snetDay >= val, snetDay: isNaN(snetDay) ? null : snetDay };
+}
+
+/**
+ * The FIRST successor of a task: among all tasks that list it as a
+ * predecessor, the one with the earliest start; ties -> lower number. Since
+ * `allTasks()` is already in display/numbering order, keeping the first
+ * match found on a tie gives the lower number for free.
+ */
+function firstSuccessor(taskId) {
+  let best = null, bestStart = Infinity;
+  for (const t of allTasks()) {
+    const dep = t.deps.find((d) => d.pred === taskId);
+    if (!dep) continue;
+    const s = isoToDay(t.start);
+    if (s < bestStart) { bestStart = s; best = { task: t, dep }; }
+  }
+  return best;
+}
+
+/** Earliest-starting task of a phase (ties -> first task in the phase). */
+function phaseEarliestTask(phase) {
+  let best = null, bestStart = Infinity;
+  for (const t of phase.tasks) {
+    const s = isoToDay(t.start);
+    if (s < bestStart) { bestStart = s; best = t; }
+  }
+  return best;
+}
+
+/**
+ * Driving EXTERNAL predecessor of a phase: among the links of the phase's
+ * earliest task that point OUTSIDE the phase, the one with the largest
+ * constraint (same rule as drivingPred, restricted to those external
+ * links). Returns null when there is none (caller falls back to the
+ * previous phase).
+ */
+function phaseDrivingPred(phaseId) {
+  const loc = findPhase(phaseId);
+  if (!loc || !loc.phase.tasks.length) return null;
+  const et = phaseEarliestTask(loc.phase);
+  const inside = new Set(loc.phase.tasks.map((x) => x.id));
+  const byId = new Map(allTasks().map((x) => [x.id, x]));
+  let dep = null, val = -Infinity;
+  for (const d of et.deps) {
+    if (inside.has(d.pred)) continue;
+    const p = byId.get(d.pred);
+    if (!p) continue;
+    const c = depConstraint(d, p, et.duration);
+    if (c > val) { val = c; dep = d; }
+  }
+  return dep ? { dep, pred: byId.get(dep.pred), task: et } : null;
+}
+
+/**
+ * Earliest external successor of ANY task in a phase: a task outside the
+ * phase that depends on one of the phase's tasks, earliest start first
+ * (ties -> lower number, see firstSuccessor). Returns null when there is
+ * none (caller falls back to the next phase).
+ */
+function phaseFirstSuccessor(phaseId) {
+  const loc = findPhase(phaseId);
+  if (!loc) return null;
+  const inside = new Set(loc.phase.tasks.map((x) => x.id));
+  let best = null, bestStart = Infinity;
+  for (const t of allTasks()) {
+    if (inside.has(t.id)) continue;
+    const dep = t.deps.find((d) => inside.has(d.pred));
+    if (!dep) continue;
+    const s = isoToDay(t.start);
+    if (s < bestStart) { bestStart = s; best = { task: t, dep, from: findTask(dep.pred).task }; }
+  }
+  return best;
+}
 </script>
 
 <!-- ======================================================================
@@ -967,6 +1225,60 @@ function dependentsOf(id) {
      ====================================================================== -->
 <script id="io">
 'use strict';
+
+/**
+ * Validates an optional array of web links ({label, url}, format 1.2) found
+ * at `path` and returns a clean array (never invalid entries). Missing
+ * (`undefined`) is valid and yields an empty array.
+ */
+function validateLinksField(v, path, err) {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) { err(path, 'must be a list [ ... ]'); return []; }
+  const out = [];
+  v.forEach((l, k) => {
+    const LP = `${path}[${k}]`;
+    if (!l || typeof l !== 'object' || Array.isArray(l)) { err(LP, 'must be an object { "label": ..., "url": ... }'); return; }
+    let ok = true;
+    if (l.label !== undefined && typeof l.label !== 'string') { err(`${LP}.label`, 'must be text'); ok = false; }
+    else if (typeof l.label === 'string' && l.label.length > LINK_LABEL_MAX) { err(`${LP}.label`, `too long (${l.label.length} characters, maximum ${LINK_LABEL_MAX})`); ok = false; }
+    if (!isSafeUrl(l.url)) { err(`${LP}.url`, `must start with "https:", "http:" or "mailto:" (found ${JSON.stringify(l.url)})`); ok = false; }
+    if (ok) out.push({ label: typeof l.label === 'string' ? l.label.slice(0, LINK_LABEL_MAX) : '', url: l.url });
+  });
+  return out;
+}
+
+/**
+ * Validates an optional array of attachments ({name, path, added}, format
+ * 1.2) found at `path` and returns a clean array. Missing is valid and
+ * yields an empty array. The files themselves are never touched here (see
+ * K5) – this only checks the entries recorded in the project file.
+ */
+function validateAttachmentsField(v, path, err) {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) { err(path, 'must be a list [ ... ]'); return []; }
+  const out = [];
+  v.forEach((a, k) => {
+    const AP = `${path}[${k}]`;
+    if (!a || typeof a !== 'object' || Array.isArray(a)) { err(AP, 'must be an object { "name": ..., "path": ..., "added": ... }'); return; }
+    let ok = true;
+    if (typeof a.name !== 'string' || !a.name.trim()) { err(`${AP}.name`, 'missing or empty file name'); ok = false; }
+    if (!isSafeRelPath(a.path)) { err(`${AP}.path`, `must be a relative path with "/" separators, no ".." and no leading "/" (found ${JSON.stringify(a.path)})`); ok = false; }
+    if (a.added !== undefined && (typeof a.added !== 'string' || isNaN(isoToDay(a.added)))) { err(`${AP}.added`, `invalid date ${JSON.stringify(a.added)} – expected "YYYY-MM-DD"`); ok = false; }
+    if (ok) out.push({ name: a.name, path: a.path, added: typeof a.added === 'string' ? a.added : fileDate() });
+  });
+  return out;
+}
+
+/**
+ * Validates an optional subfolder path ("folder" on a phase or task, format
+ * 1.2) found at `path`. Returns the clean value, or `undefined` when absent
+ * or invalid (the error is already recorded).
+ */
+function validateFolderField(v, path, err) {
+  if (v === undefined) return undefined;
+  if (!isSafeRelPath(v)) { err(path, `must be a relative path with "/" separators, no ".." and no leading "/" (found ${JSON.stringify(v)})`); return undefined; }
+  return v;
+}
 
 /**
  * Checks a parsed JSON object and converts it into a clean project.
@@ -1006,6 +1318,11 @@ function validateProject(obj) {
     if (ids.has(v)) { err(path, `duplicate id "${v}" – every phase and task needs its own id`); return false; }
     ids.add(v); return true;
   };
+  // Project root: optional attachment folder (format 1.2, set once, see K5).
+  if (obj.attachRoot !== undefined) {
+    if (!isSafeRelPath(obj.attachRoot)) err('attachRoot', `must be a relative folder path with "/" separators, no ".." and no leading "/" (found ${JSON.stringify(obj.attachRoot)})`);
+    else out.attachRoot = obj.attachRoot;
+  }
 
   obj.phases.forEach((p, i) => {
     const P = `phases[${i}]`;
@@ -1014,7 +1331,10 @@ function validateProject(obj) {
     if (typeof p.name !== 'string') err(`${P}.name`, 'missing or not text');
     if (p.collapsed !== undefined && typeof p.collapsed !== 'boolean') err(`${P}.collapsed`, 'must be true or false');
     if (!Array.isArray(p.tasks)) { err(`${P}.tasks`, 'missing or not a list [ ... ]'); return; }
-    const phase = { id: p.id, name: String(p.name ?? ''), collapsed: !!p.collapsed, tasks: [] };
+    const phase = { id: p.id, name: String(p.name ?? ''), collapsed: !!p.collapsed,
+      links: validateLinksField(p.links, `${P}.links`, err), attachments: validateAttachmentsField(p.attachments, `${P}.attachments`, err), tasks: [] };
+    const pFolder = validateFolderField(p.folder, `${P}.folder`, err);
+    if (pFolder !== undefined) phase.folder = pFolder;
     p.tasks.forEach((t, j) => {
       const T = `${P}.tasks[${j}]`;
       if (!t || typeof t !== 'object' || Array.isArray(t)) { err(T, 'must be an object { ... }'); return; }
@@ -1046,8 +1366,11 @@ function validateProject(obj) {
         duration: ms ? 0 : t.duration, percent: ms ? 0 : (isInt(t.percent) ? t.percent : 0),
         done: ms ? t.done === true : false, person: typeof t.person === 'string' ? t.person : '',
         note: typeof t.note === 'string' ? t.note : '', deps,
+        links: validateLinksField(t.links, `${T}.links`, err), attachments: validateAttachmentsField(t.attachments, `${T}.attachments`, err),
       };
       if (!ms && deps.length && !isNaN(isoToDay(t.snet))) task.snet = t.snet;
+      const tFolder = validateFolderField(t.folder, `${T}.folder`, err);
+      if (tFolder !== undefined) task.folder = tFolder;
       phase.tasks.push(task);
       seen.push({ task, path: T });
     });
@@ -1191,12 +1514,18 @@ function fileDate() { return dayToIso(todayDay()); }
 function exportJSON() {
   const data = { version: FILE_VERSION, app: 'Gantt Chart Planner', name: state.name, exported: fileDate(),
     holidays: state.holidays || defaultHolidays(), phases: state.phases };
+  if (state.attachRoot) data.attachRoot = state.attachRoot;
   const fn = `${safeFileName(state.name)}_${fileDate()}.json`;
   download(fn, JSON.stringify(data, null, 2), 'application/json');
   dirty = false;
   showMessage('Project saved',
     `<p>The project was downloaded as <b>${esc(fn)}</b>.</p>` +
     `<p class="hint">Keep this file – it is the only copy of your project. Open it later with Menu → Open project.</p>`);
+}
+
+/** True when any phase or task has web links and/or attachments (format 1.2) to warn about on CSV/XML export. */
+function hasLinksOrAttachments() {
+  return [...state.phases, ...allTasks()].some((x) => (x.links && x.links.length) || (x.attachments && x.attachments.length));
 }
 
 /** One CSV field: quoted when it contains the separator, quotes or line breaks. */
@@ -1229,7 +1558,8 @@ function exportCSV() {
   const fn = `${safeFileName(state.name)}_${fileDate()}.csv`;
   download(fn, csv, 'text/csv;charset=utf-8');
   showMessage('CSV exported', `<p>Downloaded as <b>${esc(fn)}</b> (separator “;”, UTF-8). It opens directly in Excel.</p>` +
-    `<p class="hint">CSV is for reading/analysis only – to continue working in this app, use the JSON file.</p>`);
+    `<p class="hint">CSV is for reading/analysis only – to continue working in this app, use the JSON file.</p>` +
+    (hasLinksOrAttachments() ? `<p class="hint">Links and attachments are only stored in the JSON file; this CSV does not include them.</p>` : ''));
 }
 
 /**
@@ -1296,7 +1626,8 @@ function exportXML() {
   showMessage('MS Project XML exported',
     `<p>Downloaded as <b>${esc(fn)}</b>. In Microsoft Project use <b>File → Open</b> and choose the file type <b>XML Format</b>.</p>` +
     `<p class="hint">Included: phases, tasks, milestones, dates, durations, % complete, notes and all link types with lag. ` +
-    `Not included: owners. This basic export has not been checked against every MS Project version – please verify the result.</p>`);
+    `Not included: owners. This basic export has not been checked against every MS Project version – please verify the result.</p>` +
+    (hasLinksOrAttachments() ? `<p class="hint">Links and attachments are only stored in the JSON file; this XML does not include them.</p>` : ''));
 }
 </script>
 
@@ -1408,18 +1739,143 @@ function openDetails(id, focusDeps) {
   else if (findPhase(id)) openPhaseDialog(id);
 }
 
+/* ---------------------------------------------------------------------------
+ * LINKS SECTION (K4): a "Links" fieldset (label + URL rows, add/remove) that
+ * the task and phase dialogs both embed. `links` is the dialog's own working
+ * copy (an array of {label, url}), mutated in place until "Save". This is
+ * also the template step K5 copies for the "Attachments" section, and
+ * `itemIconsHTML` below is the generic name-cell slot K5 adds its own icon
+ * to, so both features are kept easy to extend side by side.
+ * ------------------------------------------------------------------------- */
+
+/** One editable row of the Links section. */
+function linkRowHTML(link, i) {
+  return `<div class="linkrow" data-i="${i}">
+    <input data-ln="label" placeholder="Label (optional)" maxlength="${LINK_LABEL_MAX}" value="${esc(link.label || '')}" aria-label="Link label">
+    <input data-ln="url" placeholder="https://…" value="${esc(link.url || '')}" aria-label="Link URL" inputmode="url">
+    <button type="button" data-ln="rm" title="Remove this link" aria-label="Remove link">&#10005;</button></div>`;
+}
+
+/** Static markup of the Links fieldset; the row list itself is filled in by `wireLinksSection`. */
+function linksSectionHTML() {
+  return `<fieldset class="itemsec"><legend>Links</legend>
+    <div id="lnk-rows"></div>
+    <button type="button" id="lnk-add">+ Add link</button>
+  </fieldset>`;
+}
+
+/**
+ * Wires a dialog's Links section: `links` is the caller's mutable working
+ * array, edited in place (typing updates it without a full re-render; add
+ * and remove redraw the rows). The caller reads `links` back on Save.
+ */
+function wireLinksSection(d, links) {
+  const rowsEl = $('#lnk-rows', d);
+  function renderRows(focusLast) {
+    rowsEl.innerHTML = links.length ? links.map(linkRowHTML).join('')
+      : '<p class="hint" style="margin:2px 0 8px">No links yet.</p>';
+    if (focusLast) { const ins = $$('input[data-ln="label"]', rowsEl); if (ins.length) ins[ins.length - 1].focus(); }
+  }
+  rowsEl.addEventListener('input', (e) => {
+    const row = e.target.closest('.linkrow');
+    if (!row) return;
+    const l = links[Number(row.dataset.i)], key = e.target.dataset.ln;
+    if (key === 'label') l.label = e.target.value;
+    else if (key === 'url') l.url = e.target.value;
+  });
+  rowsEl.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-ln="rm"]');
+    if (!b) return;
+    links.splice(Number(b.closest('.linkrow').dataset.i), 1);
+    renderRows(false);
+  });
+  $('#lnk-add', d).addEventListener('click', () => { links.push({ label: '', url: '' }); renderRows(true); });
+  renderRows(false);
+}
+
+/**
+ * Validates a dialog's Links draft before Save: trims label/url, silently
+ * drops rows left fully empty, and rejects (with `showMessage`, returning
+ * null) a row whose URL is missing or uses a protocol other than
+ * https/http/mailto. Returns the cleaned array on success.
+ */
+async function validateLinksDraft(links) {
+  const clean = [];
+  for (let i = 0; i < links.length; i++) {
+    const label = (links[i].label || '').trim().slice(0, LINK_LABEL_MAX);
+    const url = (links[i].url || '').trim();
+    if (!label && !url) continue;
+    if (!isSafeUrl(url)) {
+      await showMessage('Invalid link', `<p>Link ${i + 1}${label ? ` (“${esc(label)}”)` : ''} needs a URL starting with "https:", "http:" or "mailto:".</p>`);
+      return null;
+    }
+    clean.push({ label, url });
+  }
+  return clean;
+}
+
+/**
+ * Opens the 🔗 icon of a table row (K4): a single link is opened directly in
+ * a new tab; two or more open a small dialog listing every labelled link.
+ * Filters out anything that is not on the safe-protocol allow-list, so an
+ * unsafe URL is never opened/rendered even if it somehow got into state
+ * (e.g. a hand-edited file).
+ */
+function openItemLinks(id) {
+  const tl = findTask(id), pl = !tl && findPhase(id);
+  const item = tl ? tl.task : (pl ? pl.phase : null);
+  if (!item) return;
+  const links = (item.links || []).filter((l) => isSafeUrl(l.url));
+  if (!links.length) return;
+  if (links.length === 1) { window.open(links[0].url, '_blank', 'noopener,noreferrer'); return; }
+  const num = numbering();
+  const d = openDialog(`
+    <h2>Links – ${esc(num.get(id))} ${esc(item.name)}</h2>
+    <ul class="linklist">${links.map((l) => `<li><a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.label || l.url)}</a></li>`).join('')}</ul>
+    <div class="btns"><button class="primary" id="lk-close">Close</button></div>`);
+  $('#lk-close', d).addEventListener('click', () => d.close());
+  $('#lk-close', d).focus();
+}
+
+/** Opens the 📎 icon of a table row (K5): the item dialog, scrolled to the Attachments section. */
+function openItemAttachments(id) {
+  if (findTask(id)) openTaskDialog(id, false, true);
+  else if (findPhase(id)) openPhaseDialog(id, true);
+}
+
+/**
+ * HTML of the small icon row shown in a table name cell for a task/phase
+ * (K4: 🔗 when it has links; K5 appends a 📎 attachment icon here the same
+ * way). Returns '' when the item has no icons to show.
+ */
+function itemIconsHTML(item) {
+  const icons = [];
+  const n = (item.links || []).length;
+  if (n) {
+    const label = n === 1 ? 'Open link' : `Links (${n})`;
+    icons.push(`<button type="button" class="icobtn" data-k="${esc(item.id)}|links" data-links="${esc(item.id)}" title="${esc(label)}" aria-label="${esc(label)}">&#128279;</button>`);
+  }
+  const m = (item.attachments || []).length;
+  if (m) {
+    const label = m === 1 ? 'Attachments (1)' : `Attachments (${m})`;
+    icons.push(`<button type="button" class="icobtn cnt" data-k="${esc(item.id)}|atc" data-attach="${esc(item.id)}" title="${esc(label)}" aria-label="${esc(label)}">&#128206;${m}</button>`);
+  }
+  return icons.length ? `<span class="item-icons">${icons.join('')}</span>` : '';
+}
+
 /**
  * TASK DIALOG: every property of a task, including type (task/milestone),
  * phase, note and the list of predecessors. Changes are applied only on
  * "Save" and form ONE undo step.
  */
-function openTaskDialog(id, focusDeps) {
+function openTaskDialog(id, focusDeps, focusAttachments) {
   const loc = findTask(id);
   if (!loc) return;
   const t = loc.task;
   const num = numbering();
   const original = JSON.parse(JSON.stringify(t));
-  let deps = original.deps.map((d) => ({ ...d }));   // working copy of the links
+  let deps = original.deps.map((d) => ({ ...d }));   // working copy of the predecessor links
+  let links = (original.links || []).map((l) => ({ ...l }));   // working copy of the Links section (K4)
   // Tasks that may be chosen as predecessors: no milestones, not itself and
   // nothing that already depends on this task (that would create a loop).
   const blocked = dependentsOf(id);
@@ -1454,6 +1910,8 @@ function openTaskDialog(id, focusDeps) {
       <p class="hint" style="margin:6px 0 0">FS finish-to-start · SS start-to-start · FF finish-to-finish · SF start-to-finish. Lag in calendar days, negative = lead.</p>
       ${depExamplesHTML(true)}
     </fieldset>
+    ${linksSectionHTML()}
+    ${attachSectionHTML()}
     <div class="btns">
       <button class="danger" id="f-del">Delete</button>
       <button id="f-dup">Duplicate</button>
@@ -1581,6 +2039,8 @@ function openTaskDialog(id, focusDeps) {
     deps.push({ pred: '', type: 'FS', lag: 0 });
     renderDeps(true);
   });
+  wireLinksSection(d, links);
+  wireAttachSection(d, 'task', id);   // K5: works on the live task directly (see attachments block)
 
   /** Validates the form and applies it as one undo step. Returns true on success. */
   async function save() {
@@ -1620,6 +2080,8 @@ function openTaskDialog(id, focusDeps) {
       await showMessage('Circular dependency', `<p>This would create a loop: ${cycle.map((c) => esc(num.get(c))).join(' → ')}. The change was not saved.</p>`);
       return false;
     }
+    const cleanLinks = await validateLinksDraft(links);
+    if (cleanLinks === null) return false;
     const phaseId = fPhase.value;
     commit(() => {
       const cur = findTask(id);
@@ -1634,6 +2096,7 @@ function openTaskDialog(id, focusDeps) {
       tt.person = fPerson.value.trim();
       tt.note = fNote.value.slice(0, NOTE_MAX);
       tt.deps = ms ? [] : clean;
+      tt.links = cleanLinks;
       if (!isNaN(snet) && clean.length) tt.snet = dayToIso(snet); else delete tt.snet;
       if (ms) for (const x of allTasks()) x.deps = x.deps.filter((dd) => dd.pred !== id);  // milestones cannot be predecessors
       if (phaseId !== cur.phase.id) {
@@ -1649,9 +2112,12 @@ function openTaskDialog(id, focusDeps) {
   f('#f-dup').addEventListener('click', async () => { if (await save()) { d.close('dup'); duplicateTask(id); } });
   f('#f-del').addEventListener('click', async () => {
     const succ = successorLinkCount(id);
+    const cur = findTask(id);
+    const hasAtt = !!(cur && cur.task.attachments && cur.task.attachments.length);
     const ok = await confirmBox('Delete task?',
       `<p>Delete <b>${esc(num.get(id))} ${esc(t.name)}</b>?</p>` +
       (succ ? `<p>${succ} dependency link(s) from other tasks point to it and will be removed.</p>` : '') +
+      (hasAtt ? '<p>Its attachment list entries will be removed, but the files themselves stay on disk.</p>' : '') +
       '<p class="hint">You can undo this with Ctrl+Z.</p>', 'Delete', true);
     if (ok) { d.close('del'); deleteTask(id); }
   });
@@ -1661,7 +2127,10 @@ function openTaskDialog(id, focusDeps) {
   });
 
   renderDeps(false);
-  if (focusDeps) {
+  if (focusAttachments) {
+    const sec = $('#atc-sec', d);
+    if (sec) sec.scrollIntoView({ block: 'start' });
+  } else if (focusDeps) {
     const first = $('select[data-dp="pred"]', fDeps) || f('#f-adddep');
     first.focus();
   } else {
@@ -1670,7 +2139,7 @@ function openTaskDialog(id, focusDeps) {
 }
 
 /** PHASE DIALOG: rename, add a task into it, or delete it with all its tasks. */
-function openPhaseDialog(id) {
+function openPhaseDialog(id, focusAttachments) {
   const loc = findPhase(id);
   if (!loc) return;
   const p = loc.phase;
@@ -1681,6 +2150,8 @@ function openPhaseDialog(id) {
     <label>Name<input id="g-name" value="${esc(p.name)}" autocomplete="off"></label>
     <p class="hint">${p.tasks.length} task(s)${s ? ` · ${dayToDisp(s.start)} – ${dayToDisp(s.end)} · ${s.duration} days · ${s.percent}% complete` : ''}.
       Dates and % of a phase are calculated from its tasks.</p>
+    ${linksSectionHTML()}
+    ${attachSectionHTML()}
     <div class="btns">
       <button class="danger" id="g-del">Delete phase</button>
       <button id="g-add">+ Task in this phase</button>
@@ -1689,21 +2160,148 @@ function openPhaseDialog(id) {
       <button class="primary" id="g-save">Save</button>
     </div>`);
   const name = $('#g-name', d);
-  const apply = () => commit(() => { const cur = findPhase(id); if (!cur) return false; cur.phase.name = name.value.trim() || 'Untitled phase'; });
-  $('#g-save', d).addEventListener('click', () => { apply(); d.close('saved'); });
+  let links = (p.links || []).map((l) => ({ ...l }));   // working copy of the Links section (K4)
+  wireLinksSection(d, links);
+  wireAttachSection(d, 'phase', id);   // K5: works on the live phase directly (see attachments block)
+  /** Validates and applies the phase's name and links as one undo step. Returns true on success. */
+  async function apply() {
+    const cleanLinks = await validateLinksDraft(links);
+    if (cleanLinks === null) return false;
+    commit(() => {
+      const cur = findPhase(id);
+      if (!cur) return false;
+      cur.phase.name = name.value.trim() || 'Untitled phase';
+      cur.phase.links = cleanLinks;
+    });
+    return true;
+  }
+  $('#g-save', d).addEventListener('click', async () => { if (await apply()) d.close('saved'); });
   $('#g-cancel', d).addEventListener('click', () => d.close('cancel'));
-  $('#g-add', d).addEventListener('click', () => { apply(); d.close('add'); ui.selected = id; addTask(); });
+  $('#g-add', d).addEventListener('click', async () => { if (await apply()) { d.close('add'); ui.selected = id; addTask(); } });
   $('#g-del', d).addEventListener('click', async () => {
     const n = p.tasks.length;
+    const hasAtt = (p.attachments && p.attachments.length) || p.tasks.some((t) => t.attachments && t.attachments.length);
     const ok = await confirmBox('Delete phase?',
       `<p>Delete phase <b>${esc(num.get(id))} ${esc(p.name)}</b>${n ? ` and its <b>${n}</b> task(s)` : ''}?</p>` +
       (n ? '<p>Dependency links from other tasks to these tasks will also be removed.</p>' : '') +
+      (hasAtt ? '<p>Attachment list entries will be removed, but the files themselves stay on disk.</p>' : '') +
       '<p class="hint">You can undo this with Ctrl+Z.</p>', 'Delete', true);
     if (ok) { d.close('del'); deletePhase(id); }
   });
-  d.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing && e.target === name) { e.preventDefault(); $('#g-save', d).click(); } });
-  name.focus();
-  name.select();
+  d.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing && (e.target === name || e.target.closest('.linkrow'))) { e.preventDefault(); $('#g-save', d).click(); } });
+  if (focusAttachments) { const sec = $('#atc-sec', d); if (sec) sec.scrollIntoView({ block: 'start' }); }
+  else { name.focus(); name.select(); }
+}
+
+/** "FS +2d" / "SS −1d" / plain "FS" when there is no lag (K3 boxes). */
+function linkLagText(dep) {
+  const lag = Number(dep.lag) || 0;
+  if (!lag) return dep.type;
+  return `${dep.type} ${lag > 0 ? '+' : '−'}${Math.abs(lag)}d`;
+}
+
+/** Done / In progress / Not started, the same rule used for tasks and phases (K3 boxes). */
+function wnState(percent, milestoneDone) {
+  if (milestoneDone !== undefined) return milestoneDone ? 'Done' : 'Not started';
+  if (percent >= 100) return 'Done';
+  if (percent > 0) return 'In progress';
+  return 'Not started';
+}
+
+/** One "What next?" box worth of display data for a task (also used for a phase's pred/succ, which are always tasks). */
+function wnTaskBox(t, num) {
+  return { id: t.id, isPhase: false, num: num.get(t.id), name: t.name,
+    span: `${dayToDisp(isoToDay(t.start))} – ${dayToDisp(taskEndDay(t))}`,
+    pct: t.milestone ? null : t.percent, state: wnState(t.percent, t.milestone ? t.done : undefined) };
+}
+
+/** One "What next?" box worth of display data for a phase (dates/% from phaseSummary). */
+function wnPhaseBox(p, num) {
+  const sm = phaseSummary(p);
+  return { id: p.id, isPhase: true, num: num.get(p.id), name: p.name,
+    span: sm ? `${dayToDisp(sm.start)} – ${dayToDisp(sm.end)}` : '—',
+    pct: sm ? sm.percent : null, state: wnState(sm ? sm.percent : 0) };
+}
+
+/** Renders one box of the "What next?" dialog; `entry` null shows the "no predecessor/successor" placeholder. */
+function wnBoxHTML(entry, roleLabel, noneText) {
+  if (!entry) return `<div class="wn-box wn-none">${esc(noneText)}</div>`;
+  const clickable = roleLabel !== 'Selected';
+  return `<div class="wn-box${clickable ? ' wn-click' : ' wn-self'}"${clickable ? ` data-wn="${esc(entry.id)}" role="button" tabindex="0" aria-label="Go to ${esc(entry.isPhase ? 'phase' : 'task')} ${esc(entry.num)} ${esc(entry.name)}"` : ''}>` +
+    `<div class="wn-role">${esc(entry.label || roleLabel)}</div>` +
+    `<div class="wn-num">${esc(entry.num)} <span class="wn-kind">${entry.isPhase ? 'Phase' : 'Task'}</span></div>` +
+    `<div class="wn-name">${esc(entry.name)}</div>` +
+    `<div class="wn-span">${esc(entry.span)}</div>` +
+    `<div class="wn-meta">${entry.pct === null ? '' : entry.pct + '% · '}${esc(entry.state)}</div>` +
+    (entry.link ? `<div class="wn-link">${esc(entry.link)}</div>` : '') + `</div>`;
+}
+
+/**
+ * "WHAT NEXT?" DIALOG (K3): shows the driving predecessor and the earliest
+ * successor of the selected task or phase (a phase falls back to the
+ * previous/next phase when it has no external link). Read-only - no
+ * `commit()`, no undo step. Clicking a predecessor/successor box walks the
+ * chain: it selects that item, scrolls it into view and re-opens this
+ * dialog for it. While open, the timeline highlights just the two boxed
+ * tasks/phases that have a real link and dims everything else.
+ */
+function openWhatNext(id) {
+  id = id || ui.selected;
+  const tl = id ? findTask(id) : null, pl = !tl && id ? findPhase(id) : null;
+  if (!tl && !pl) { showMessage('What do I do next?', '<p>Select a task or phase first.</p>'); return; }
+  const num = numbering();
+  const hiIds = new Set([id]), hiLinks = new Set();
+  let selfBox, pred = null, succ = null, note = '';
+
+  if (tl) {
+    selfBox = wnTaskBox(tl.task, num);
+    const dp = drivingPred(id);
+    if (dp) {
+      pred = { ...wnTaskBox(dp.pred, num), link: linkLagText(dp.dep) };
+      hiIds.add(dp.pred.id); hiLinks.add(`${id}|${dp.pred.id}`);
+      if (dp.viaSnet) note = `Start set by constraint: Start no earlier than ${dayToDisp(dp.snetDay)}.`;
+    }
+    const fs = firstSuccessor(id);
+    if (fs) { succ = { ...wnTaskBox(fs.task, num), link: linkLagText(fs.dep) }; hiIds.add(fs.task.id); hiLinks.add(`${fs.task.id}|${id}`); }
+  } else {
+    const p = pl.phase;
+    selfBox = wnPhaseBox(p, num);
+    const dp = phaseDrivingPred(id);
+    if (dp) {
+      pred = { ...wnTaskBox(dp.pred, num), link: linkLagText(dp.dep) };
+      hiIds.add(dp.pred.id); hiIds.add(dp.task.id); hiLinks.add(`${dp.task.id}|${dp.pred.id}`);
+    } else {
+      const prev = siblingPhase(id, -1);
+      if (prev) { pred = { ...wnPhaseBox(prev, num), label: 'Previous phase' }; hiIds.add(prev.id); }
+    }
+    const fs = phaseFirstSuccessor(id);
+    if (fs) {
+      succ = { ...wnTaskBox(fs.task, num), link: linkLagText(fs.dep) };
+      hiIds.add(fs.task.id); hiIds.add(fs.from.id); hiLinks.add(`${fs.task.id}|${fs.from.id}`);
+    } else {
+      const next = siblingPhase(id, 1);
+      if (next) { succ = { ...wnPhaseBox(next, num), label: 'Next phase' }; hiIds.add(next.id); }
+    }
+  }
+
+  setK3Highlight(hiIds, hiLinks);
+  const d = openDialog(`
+    <h2>What do I do next?</h2>
+    <div class="wn-row">
+      ${wnBoxHTML(pred, 'Predecessor', 'No predecessor')}
+      ${wnBoxHTML(selfBox, 'Selected', '')}
+      ${wnBoxHTML(succ, 'Successor', 'No successor')}
+    </div>
+    ${note ? `<p class="hint wn-note">${esc(note)}</p>` : ''}
+    <div class="btns"><button class="primary" id="wn-close">Close</button></div>`,
+    () => clearK3Highlight());
+  $$('[data-wn]', d).forEach((el) => {
+    const go = () => { const target = el.dataset.wn; d.close(); walkTo(target); };
+    el.addEventListener('click', go);
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+  });
+  $('#wn-close', d).addEventListener('click', () => d.close());
+  $('#wn-close', d).focus();
 }
 
 /**
@@ -1818,6 +2416,15 @@ function helpHTML(short) {
       <li>Durations are <b>calendar days</b> (weekends included), at least 1 day. An end date before the start is corrected automatically.</li>
       <li><b>Milestones</b> (circles) mark a date and have no links. Tick “reached” to fill the circle.</li>
       <li>Phases: ▾/▸ collapses a phase; its bar spans all of its tasks. Use ↑/↓ to reorder rows – numbers update automatically.</li>
+      <li><b>Today line:</b> a red vertical line marks today's date in the timeline. Click <b>Today</b> to scroll to it (and the line blinks three times). Visible in both week and month zoom, and on printed pages.</li>
+      <li><b>Web links:</b> the task and phase dialogs have a "Links" section (label + URL, add/remove); only https:, http: and mailto: links are accepted. An item with links shows a 🔗 in its name cell in the table: click it to open the single link, or to see a list when there is more than one. Links are only kept in the JSON file (not in CSV/MS Project exports).</li>
+      <li><b>Attachments:</b> the task and phase dialogs have an "Attachments" section ("+ Add file…", "Update snapshot"). Files are never stored inside the JSON – they live next to it, in a folder named "&lt;project name&gt;_Attachments", with one subfolder per task/phase (created the first time a file is added). Every subfolder starts with a "snapshot" PNG picture of that item's schedule; "Update snapshot" adds a newer one without touching the file list. Keep gantt-planner.html, the project's JSON file and its "_Attachments" folder together in one place.
+        <ul>
+          <li><b>Chrome/Edge:</b> the first "Add file…"/"Update snapshot" asks you to pick the folder that holds the JSON file once; the app then copies files there directly (name clashes get " (2)", " (3)", …) and "Open" shows the file straight from disk. If a file cannot be found any more, it is marked "missing" with a "Re-select…" button.</li>
+          <li><b>Safari/Firefox:</b> the browser cannot write to an arbitrary folder, so "Add file…" only records the file's name and target path, downloads the snapshot, and shows exactly what to move into the "_Attachments" subfolder by hand. "Open" then follows a relative link, which only works once the file is actually there next to gantt-planner.html.</li>
+        </ul>
+        An item with attachments shows a 📎 with a count in its name cell; click it to jump straight to that item's Attachments section. Removing an entry only removes it from the list – the file itself is never deleted.</li>
+      <li><b>What next?</b> (toolbar, next to the project name): select a task or phase first, then click it (or the ⏭ icon on narrow screens) to see its driving predecessor and its earliest successor, with the link type and lag between them. A phase without an external link shows the previous/next phase instead. Click a predecessor/successor box to jump to it and see its own "next" links.</li>
       <li>The browser warns you before closing the page with unsaved changes. Undo keeps the last 10 steps (an opened file counts as one step).</li>
       <li>Exports: CSV for Excel, basic MS Project XML (owners not included – please check the result in MS Project), Print/PDF on A4 landscape, split into several pages if needed.</li>
     </ul>
@@ -1835,7 +2442,7 @@ function helpHTML(short) {
       <tr><td>${k('Esc')}</td><td>Undo the current table edit · close a dialog</td></tr>
     </table>
     <p class="hint">On a Mac use ⌘ instead of Ctrl and ⌥ instead of Alt.</p>
-    <p class="hint">Gantt Chart Planner 2.0 · works offline · no data leaves this device.</p></div>`;
+    <p class="hint">Gantt Chart Planner 3.0 · works offline · no data leaves this device.</p></div>`;
 }
 
 /** Help dialog (Menu → Help & shortcuts). */
@@ -1886,6 +2493,20 @@ let lastLayout = null;
 /** Data key (e.g. "t5|name") of the field that should get focus after the next render. */
 let pendingFocus = null;
 let renderQueued = false;
+/** Flag to apply the today line blink after the next render. */
+let applyTodayBlink = false;
+/**
+ * Set while the "What next?" dialog (K3) is open: { ids: Set, links: Set }
+ * of the task/phase ids and "succ|pred" arrow keys to keep at full opacity;
+ * everything else on the timeline is dimmed. null = no highlight.
+ */
+let k3Highlight = null;
+
+/** Turns the "What next?" highlight on and redraws. */
+function setK3Highlight(ids, links) { k3Highlight = { ids, links }; render(); }
+
+/** Turns the "What next?" highlight off (called when its dialog closes) and redraws. */
+function clearK3Highlight() { if (k3Highlight) { k3Highlight = null; render(); } }
 
 /** Coalesces many change requests into one render per animation frame. */
 function requestRender() {
@@ -1963,6 +2584,22 @@ function visibleRows() {
 function timelineHeaderInner(g) {
   const H = 44, mid = 22;
   let s = `<line x1="0" y1="${mid + 0.5}" x2="${g.width}" y2="${mid + 0.5}" class="th-l"/>`;
+  // Add "Today" label in the day-number row (positioned below week/month headers).
+  const today = todayDay();
+  if (today >= g.start && today <= g.end) {
+    const x = g.x(today) + g.dayW / 2;
+    if (g.zoom === 'week') {
+      // Week view: show day number as a red pill (replacing the normal number).
+      const d = dayParts(today).d;
+      const tw = Math.max(14, g.dayW - 2);
+      s += `<rect x="${x - tw/2}" y="27" width="${tw}" height="14" class="today-label-bg"/>` +
+        `<text x="${x}" y="38" class="today-label">${d}</text>`;
+    } else {
+      // Month view: compact "T" label on the line.
+      s += `<rect x="${x - 6}" y="${H - 12}" width="12" height="10" class="today-label-bg"/>` +
+        `<text x="${x}" y="${H - 4}" class="today-label" style="font-size:8px">T</text>`;
+    }
+  }
   const seg = (from, nextFn, y1, y2, label, minW) => {
     let n = from;
     while (n <= g.end) {
@@ -1980,7 +2617,8 @@ function timelineHeaderInner(g) {
       const x = g.x(n), mon = mondayIndex(n) === 0;
       if (mon) s += `<line x1="${x + 0.5}" y1="${mid}" x2="${x + 0.5}" y2="${H}" class="th-l"/>`;
       const hol = g.hol.get(n);
-      s += `<text x="${x + g.dayW / 2}" y="${mid + 15}" text-anchor="middle" class="th-t${mon ? ' th-b' : ''}${hol ? ' th-hol' : ''}">${dayParts(n).d}</text>`;
+      // Today's day number is already shown by the red pill above (n === today) - do not draw it twice.
+      if (n !== today) s += `<text x="${x + g.dayW / 2}" y="${mid + 15}" text-anchor="middle" class="th-t${mon ? ' th-b' : ''}${hol ? ' th-hol' : ''}">${dayParts(n).d}</text>`;
       if (hol) s += `<rect x="${x}" y="${mid}" width="${g.dayW}" height="${H - mid}" fill="transparent"><title>${esc(dayToDisp(n) + '\n' + hol.join('\n'))}</title></rect>`;
     }
   } else {
@@ -2058,6 +2696,9 @@ function arrowPath(x1, y1, d1, x2, y2, d2, rh) {
  */
 function timelineBodyInner(rows, g, rh, markerId, num, interactive = true) {
   const H = rows.length * rh;
+  // "What next?" highlight (K3): only in the interactive, on-screen SVG - never in print pages.
+  const hi = interactive ? k3Highlight : null;
+  const dimBar = (id) => (hi && !hi.ids.has(id) ? ' wn-dim' : '');
   let s = `<defs><marker id="${markerId}" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">` +
     `<path d="M0 0L8 4L0 8z" fill="#4b5563"/></marker></defs>`;
   s += backgroundInner(g, H);
@@ -2078,7 +2719,7 @@ function timelineBodyInner(rows, g, rh, markerId, num, interactive = true) {
       const bh = Math.max(6, Math.round(rh * 0.22)), by = y + Math.round(rh * 0.34);
       const col = phaseColor(r.phase);
       const tip = `${num.get(r.phase.id)} ${r.phase.name}\n${dayToDisp(sm.start)} – ${dayToDisp(sm.end)} · ${sm.duration} d · ${sm.percent}%`;
-      bars += `<g class="bar" data-open="${esc(r.phase.id)}"><title>${esc(tip)}</title>` +
+      bars += `<g class="bar${dimBar(r.phase.id)}" data-open="${esc(r.phase.id)}"><title>${esc(tip)}</title>` +
         `<rect x="${x - 4}" y="${y}" width="${w + 8}" height="${rh}" fill="transparent"/>` +
         `<rect x="${x}" y="${by}" width="${w}" height="${bh}" fill="${col}" rx="1"/>` +
         `<path d="M${x} ${by + bh}h7l-7 6z M${x + w} ${by + bh}h-7l7 6z" fill="${col}"/></g>`;
@@ -2090,7 +2731,7 @@ function timelineBodyInner(rows, g, rh, markerId, num, interactive = true) {
     if (t.milestone) {
       const cx = g.x(s0) + g.dayW / 2, cy = y + rh / 2, rr = Math.max(5, Math.round(rh * 0.2));
       const tip = `${num.get(t.id)} ${t.name}\nMilestone ${dayToDisp(s0)} · ${t.done ? 'reached' : 'not reached'}`;
-      bars += `<g class="bar" data-open="${esc(t.id)}"><title>${esc(tip)}</title>` +
+      bars += `<g class="bar${dimBar(t.id)}" data-open="${esc(t.id)}"><title>${esc(tip)}</title>` +
         `<rect x="${cx - rh / 2}" y="${y}" width="${rh}" height="${rh}" fill="transparent"/>` +
         `<circle cx="${cx}" cy="${cy}" r="${rr}" class="ms-c ${t.done ? 'ms-done' : 'ms-open'}"/></g>`;
       return;
@@ -2101,7 +2742,7 @@ function timelineBodyInner(rows, g, rh, markerId, num, interactive = true) {
     const pw = (w * t.percent) / 100;
     const tip = `${num.get(t.id)} ${t.name}\n${dayToDisp(s0)} – ${dayToDisp(end)} · ${t.duration} d · ${t.percent}%` +
       (t.person ? `\nOwner: ${t.person}` : '') + (t.deps.length ? `\nPredecessors: ${predText(t, num)}` : '');
-    bars += `<g class="bar" data-open="${esc(t.id)}"><title>${esc(tip)}</title>` +
+    bars += `<g class="bar${dimBar(t.id)}" data-open="${esc(t.id)}"><title>${esc(tip)}</title>` +
       `<rect x="${x - 6}" y="${y}" width="${w + 12}" height="${rh}" fill="transparent"/>` +
       `<rect class="bar-bg" x="${x}" y="${by}" width="${w}" height="${bh}" rx="3"/>` +
       (pw > 0 ? `<rect class="bar-pg" x="${x}" y="${by}" width="${pw}" height="${bh}" rx="3"/>` : '') + `</g>`;
@@ -2129,7 +2770,8 @@ function timelineBodyInner(rows, g, rh, markerId, num, interactive = true) {
       }
       const path = arrowPath(x1, pp.yc, d1, x2, sp.yc, d2, rh);
       const link = `${esc(r.task.id)}|${esc(dep.pred)}`;
-      arrows += `<path class="arrow" d="${path}" marker-end="url(#${markerId})"/>`;
+      const dimArrow = hi && !hi.links.has(`${r.task.id}|${dep.pred}`) ? ' wn-dim' : '';
+      arrows += `<path class="arrow${dimArrow}" d="${path}" marker-end="url(#${markerId})"/>`;
       if (interactive) {
         // Wide invisible line = click target (opens the link editor); circle at the arrow tip = drag to re-connect.
         arrows += `<path class="arrow-hit" data-link="${link}" d="${path}"><title>${esc(`${num.get(dep.pred)} → ${num.get(r.task.id)} · ${dep.type}${dep.lag ? (dep.lag > 0 ? '+' : '') + dep.lag + 'd' : ''}\nClick to edit · drag the arrow tip to another task`)}</title></path>`;
@@ -2137,9 +2779,16 @@ function timelineBodyInner(rows, g, rh, markerId, num, interactive = true) {
       }
     }
   }
-  // Order: background, arrows, bars, arrow tips, link handles on top. Tips sit 10 px before the
+  // Add today line (red vertical line at the start of today's column).
+  let todayLine = '';
+  const today = todayDay();
+  if (today >= g.start && today <= g.end) {
+    const x = g.x(today) + 0.5;
+    todayLine = `<line x1="${x}" y1="0" x2="${x}" y2="${H}" class="today-line"/>`;
+  }
+  // Order: background, arrows, bars, today line, arrow tips, link handles on top. Tips sit 10 px before the
   // bar edge so they do not collide with the handle on that edge.
-  return s + arrows + bars + top + hdls;
+  return s + arrows + bars + todayLine + top + hdls;
 }
 
 /** The two ↑/↓ buttons of a row. */
@@ -2157,7 +2806,8 @@ function rowHTML(r, C, num, g) {
     return `<div class="row phase${ui.selected === p.id ? ' sel' : ''}" data-row="${id}">` +
       cell(C.id, `<button class="idbtn" data-k="${id}|id" data-open="${id}" title="Phase details">${num.get(p.id)}</button>`, 'sticky', ';left:0') +
       cell(C.name, `<button class="tog" data-k="${id}|tog" data-toggle="${id}" aria-expanded="${!p.collapsed}" title="${p.collapsed ? 'Expand' : 'Collapse'} phase">${p.collapsed ? '&#9656;' : '&#9662;'}</button>` +
-        `<input data-k="${id}|name" data-f="name" value="${esc(p.name)}" title="${esc(p.name)}" aria-label="Phase name" autocomplete="off">`,
+        `<input data-k="${id}|name" data-f="name" value="${esc(p.name)}" title="${esc(p.name)}" aria-label="Phase name" autocomplete="off">` +
+        itemIconsHTML(p),
         'sticky c-name', `;left:${C.id}px;box-shadow:inset 4px 0 0 ${phaseColor(p)}`) +
       cell(C.act, moveBtns(p.id), 'c-act') +
       cell(C.start, sm ? dayToDisp(sm.start) : '', 'muted') +
@@ -2171,7 +2821,7 @@ function rowHTML(r, C, num, g) {
   const pt = predText(t, num);
   return `<div class="row task${ui.selected === t.id ? ' sel' : ''}" data-row="${id}">` +
     cell(C.id, `<button class="idbtn" data-k="${id}|id" data-open="${id}" title="Task details">${num.get(t.id)}</button>`, 'sticky', ';left:0') +
-    cell(C.name, input('name', t.name, ` title="${esc(t.name)}" aria-label="${t.milestone ? 'Milestone' : 'Task'} name"`), 'sticky c-name', `;left:${C.id}px`) +
+    cell(C.name, input('name', t.name, ` title="${esc(t.name)}" aria-label="${t.milestone ? 'Milestone' : 'Task'} name"`) + itemIconsHTML(t), 'sticky c-name', `;left:${C.id}px`) +
     cell(C.act, moveBtns(t.id), 'c-act') +
     cell(C.start, input('start', dayToDisp(s0), auto
       ? (t.snet
@@ -2232,6 +2882,18 @@ function render() {
       el.focus({ preventScroll: !selectText });
       if (selectText && typeof el.select === 'function') el.select();
     }
+  }
+  // Apply today line blink if requested (after a render triggered by scrolling).
+  if (applyTodayBlink) {
+    applyTodayBlink = false;
+    requestAnimationFrame(() => {
+      const line = $('svg.tl .today-line');
+      if (line) {
+        line.classList.remove('blink');
+        void line.offsetWidth;  // Force reflow
+        line.classList.add('blink');
+      }
+    });
   }
   updateToolbar();
 }
@@ -2321,6 +2983,819 @@ window.addEventListener('afterprint', () => { $('#printArea').innerHTML = ''; })
 </script>
 
 <!-- ======================================================================
+     7b. SNAPSHOT: stand-alone SVG -> PNG image of one task/milestone/phase
+     (used by the attachments feature, K5, to create "_snapshot_....png";
+     this block only builds the image - it never touches files or dialogs)
+     ====================================================================== -->
+<script id="snapshot">
+'use strict';
+/*
+ * The snapshot is a small, self-contained picture (header text + a mini
+ * Gantt of the item and its neighbours) that other code can save as a real
+ * PNG file. It must draw correctly with nothing but the SVG string itself
+ * (no external stylesheet, no <foreignObject>, no network access), because
+ * it is later rasterised through an <img>/<canvas> - a stylesheet from the
+ * main page would not apply there, and Safari taints the canvas on anything
+ * it treats as "external" content. So every class used by the reused
+ * ui-render helpers (timelineHeaderInner, timelineBodyInner, ...) gets its
+ * rule duplicated in a small inline <style> element inside the SVG itself.
+ */
+
+/** Inline copy of the ui-render SVG classes this snapshot reuses (colours copied from :root). */
+const SNAPSHOT_STYLE =
+  '.g1{stroke:#eceff3;stroke-width:1;fill:none}' +
+  '.g2{stroke:#c9d0d8;stroke-width:1;fill:none}' +
+  '.th-l{stroke:#d9dee4;stroke-width:1}' +
+  '.th-t{font-size:11px;fill:#5f6b7a}' +
+  '.th-b{font-weight:700;fill:#1f2328}' +
+  '.th-hol{fill:#b42318;font-weight:700}' +
+  '.bar-bg{fill:#a9b5c6}' +
+  '.bar-pg{fill:#3e5068}' +
+  '.ms-c{stroke:#1f2328;stroke-width:3}' +
+  '.ms-open{fill:#fff}' +
+  '.ms-done{fill:#1f2328}' +
+  '.arrow{stroke:#4b5563;stroke-width:1.25;fill:none}' +
+  '.zb{fill:#000;fill-opacity:.022}' +
+  '.hol{fill:#D55E00;fill-opacity:.10}' +
+  '.today-line{stroke:#d00;stroke-width:2}' +
+  '.today-label-bg{fill:#d00}' +
+  '.today-label{fill:#fff;font-weight:700;font-size:10px;text-anchor:middle}' +
+  'text{font-family:system-ui, Arial, sans-serif}';
+
+/** Column layout of the mini table on the left of the snapshot's Gantt part. */
+/* Start/Finish are wide enough for a bold "14.09.2026" (10 chars at a generous 8.5 px/char + padding). */
+const SNAP_COLS = [{ w: 36, t: '#' }, { w: 190, t: 'Name' }, { w: 100, t: 'Start' }, { w: 100, t: 'Finish' }];
+/** Row height of the mini Gantt (a bit tighter than the on-screen 32/45 px so more rows fit). */
+const SNAP_RH = 26;
+
+/** Current time as "HH:MM" (24h, local time - the snapshot is a human-readable note, not stored data). */
+function snapshotTimeNow() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** Cuts long free text to `max` characters (with an ellipsis) so it cannot overflow a fixed-width column. */
+function snapshotClip(s, max) {
+  s = String(s ?? '');
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+/** Full, unfiltered, uncollapsed row list in display order (unlike visibleRows(), used on screen). */
+function snapshotAllRows() {
+  const rows = [];
+  for (const p of state.phases) {
+    rows.push({ kind: 'phase', phase: p });
+    for (const t of p.tasks) rows.push({ kind: 'task', task: t, phase: p });
+  }
+  return rows;
+}
+
+/**
+ * Timeline geometry for the snapshot: always covers `s0..e0` (the item's own
+ * span) plus 14 days on each side. Week-style (day-level) rendering is used
+ * whenever it still fits into the target width; very long spans (a phase of
+ * several months) fall back to the month-style rendering also used by the
+ * app's month zoom, so the day columns never get too thin to read.
+ */
+function snapshotGeom(s0, e0) {
+  const start = s0 - 14, end = e0 + 14;
+  const days = Math.max(1, end - start + 1);
+  const TARGET_W = 980;
+  let zoom = 'week', dayW = Math.min(34, Math.max(10, TARGET_W / days));
+  if (dayW <= 10 && days > 90) { zoom = 'month'; dayW = 5; }
+  const width = Math.round(days * dayW);
+  return {
+    zoom, start, end, dayW, width, x: (n) => (n - start) * dayW,
+    hdrH: zoom === 'month' ? 66 : 44, hol: holidayIndex(start, end),
+  };
+}
+
+/**
+ * Weekend shading behind the grid (drawn in addition to what timelineBodyInner
+ * already draws itself - zebra banding and, via the same ".hol" class now
+ * declared in SNAPSHOT_STYLE, public holidays - so it is not repeated here).
+ */
+function snapshotBackground(g, height) {
+  let wknd = '';
+  for (let n = g.start; n <= g.end; n++) {
+    if (mondayIndex(n) >= 5) wknd += `M${g.x(n)} 0h${g.dayW}v${height}h${-g.dayW}z`;
+  }
+  return `<path d="${wknd}" fill="#000" fill-opacity=".05"/>`;
+}
+
+/** The "#, Name, Start, Finish" table on the left of the mini Gantt, as plain SVG text (no HTML/foreignObject allowed here). */
+function snapshotLeftTable(rows, num, hdrH, rh) {
+  const totalW = SNAP_COLS.reduce((a, c) => a + c.w, 0);
+  let s = `<rect x="0" y="0" width="${totalW}" height="${hdrH}" fill="#f5f7f9"/>`;
+  let x = 0;
+  for (const c of SNAP_COLS) {
+    s += `<text x="${x + 6}" y="${hdrH - 10}" font-size="11" font-weight="700" fill="#1f2328">${esc(c.t)}</text>`;
+    x += c.w;
+  }
+  s += `<line x1="0" y1="${hdrH - 0.5}" x2="${totalW}" y2="${hdrH - 0.5}" stroke="#d9dee4"/>`;
+  rows.forEach((r, i) => {
+    const y = hdrH + i * rh;
+    let vals, indent = false;
+    if (r.kind === 'phase') {
+      const sm = phaseSummary(r.phase);
+      vals = [num.get(r.phase.id), r.phase.name, sm ? dayToDisp(sm.start) : '', sm ? dayToDisp(sm.end) : ''];
+    } else {
+      const t = r.task;
+      vals = [num.get(t.id), t.name, dayToDisp(isoToDay(t.start)), t.milestone ? '—' : dayToDisp(taskEndDay(t))];
+      indent = true;
+    }
+    let cx = 0;
+    vals.forEach((v, ci) => {
+      const pad = ci === 1 && indent ? 16 : 6;
+      const max = ci === 1 ? 28 : 10;
+      s += `<text x="${cx + pad}" y="${y + rh - 8}" font-size="11.5"${r.kind === 'phase' ? ' font-weight="700"' : ''} fill="#1f2328">${esc(snapshotClip(v, max))}</text>`;
+      cx += SNAP_COLS[ci].w;
+    });
+    s += `<line x1="0" y1="${y + rh - 0.5}" x2="${totalW}" y2="${y + rh - 0.5}" stroke="#eceff3"/>`;
+  });
+  return s;
+}
+
+/** Header info lines for the snapshot: what the item is, its dates, progress, owner and predecessors. */
+function snapshotInfoLines(kind, item, num) {
+  const lines = [];
+  if (kind === 'task') {
+    const t = item.task;
+    const label = t.milestone ? 'Milestone' : 'Task';
+    lines.push(`${num.get(t.id)} ${snapshotClip(t.name, 70)} · ${label}`);
+    if (t.milestone) {
+      lines.push(`Date: ${dayToDisp(isoToDay(t.start))} · ${t.done ? 'Reached' : 'Not reached'}`);
+    } else {
+      lines.push(`Start – Finish: ${dayToDisp(isoToDay(t.start))} – ${dayToDisp(taskEndDay(t))}`);
+      lines.push(`Duration: ${t.duration} day${t.duration === 1 ? '' : 's'} · ${t.percent}% complete`);
+    }
+    if (t.person) lines.push(`Owner: ${t.person}`);
+    lines.push(`Predecessors: ${t.deps.length ? predText(t, num) : 'none'}`);
+  } else {
+    const p = item.phase, sm = phaseSummary(p);
+    lines.push(`${num.get(p.id)} ${snapshotClip(p.name, 70)} · Phase`);
+    if (sm) {
+      lines.push(`Start – Finish: ${dayToDisp(sm.start)} – ${dayToDisp(sm.end)}`);
+      lines.push(`Duration: ${sm.duration} day${sm.duration === 1 ? '' : 's'} · ${sm.percent}% complete`);
+    } else {
+      lines.push('No tasks yet.');
+    }
+  }
+  return lines;
+}
+
+/**
+ * Builds the snapshot as {svg, width, height}, or null when the task/phase
+ * no longer exists. `kind` is 'task' or 'phase', `id` its id.
+ */
+function buildSnapshotDoc(kind, id) {
+  const item = kind === 'task' ? findTask(id) : kind === 'phase' ? findPhase(id) : null;
+  if (!item) return null;
+  const num = numbering();
+  const rowsAll = snapshotAllRows();
+  const targetIdx = rowsAll.findIndex((r) => (r.kind === 'task' ? r.task.id : r.phase.id) === id);
+  if (targetIdx < 0) return null;
+
+  // The item's own date span (a milestone spans a single day; an empty phase falls back to today).
+  let s0, e0;
+  if (kind === 'task') {
+    s0 = isoToDay(item.task.start);
+    e0 = taskEndDay(item.task);
+  } else {
+    const sm = phaseSummary(item.phase);
+    s0 = sm ? sm.start : todayDay();
+    e0 = sm ? sm.end : todayDay();
+  }
+
+  const lo = Math.max(0, targetIdx - 5), hi = Math.min(rowsAll.length - 1, targetIdx + 5);
+  const rows = rowsAll.slice(lo, hi + 1);
+  const hlIdx = targetIdx - lo;
+
+  const g = snapshotGeom(s0, e0);
+  const leftW = SNAP_COLS.reduce((a, c) => a + c.w, 0);
+  const bodyH = rows.length * SNAP_RH;
+  const tableH = g.hdrH + bodyH;
+  const tableW = leftW + g.width;
+
+  const infoLines = snapshotInfoLines(kind, item, num);
+  const MARGIN = 16, TITLE_H = 26, LINE_H = 19, GAP = 14;
+  const infoH = TITLE_H + infoLines.length * LINE_H + 6;
+  const width = MARGIN * 2 + tableW;
+  const height = MARGIN * 2 + infoH + GAP + tableH;
+
+  let infoSvg = `<text x="0" y="18" font-size="18" font-weight="700" fill="#1f2328">${esc(snapshotClip(state.name, 70))}</text>` +
+    `<text x="0" y="${TITLE_H + 13}" font-size="12" fill="#5f6b7a">Snapshot created ${dayToDisp(todayDay())} ${snapshotTimeNow()}</text>`;
+  infoLines.forEach((l, i) => {
+    infoSvg += `<text x="0" y="${TITLE_H + LINE_H + 13 + i * LINE_H}" font-size="13" fill="#1f2328">${esc(l)}</text>`;
+  });
+
+  const hlBand = `<rect x="0" y="${g.hdrH + hlIdx * SNAP_RH}" width="${tableW}" height="${SNAP_RH}" fill="#ffe066" fill-opacity=".55"/>`;
+  let phaseBands = '';
+  rows.forEach((r, i) => {
+    if (i !== hlIdx && r.kind === 'phase') phaseBands += `<rect x="0" y="${g.hdrH + i * SNAP_RH}" width="${tableW}" height="${SNAP_RH}" fill="#f7f8fa"/>`;
+  });
+
+  const tableSvg = `<rect x="0" y="0" width="${tableW}" height="${tableH}" fill="#fff" stroke="#d9dee4"/>` +
+    phaseBands + hlBand +
+    snapshotLeftTable(rows, num, g.hdrH, SNAP_RH) +
+    `<line x1="${leftW - 0.5}" y1="0" x2="${leftW - 0.5}" y2="${tableH}" stroke="#d9dee4"/>` +
+    `<g transform="translate(${leftW},0)">` +
+    `<svg x="0" y="0" width="${g.width}" height="${g.hdrH}" overflow="hidden">${timelineHeaderInner(g)}</svg>` +
+    `<svg x="0" y="${g.hdrH}" width="${g.width}" height="${bodyH}" overflow="hidden">${snapshotBackground(g, bodyH)}${timelineBodyInner(rows, g, SNAP_RH, 'snapmk', num, false)}</svg>` +
+    `</g>`;
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
+    `<style>${SNAPSHOT_STYLE}</style>` +
+    `<rect x="0" y="0" width="${width}" height="${height}" fill="#fff"/>` +
+    `<g transform="translate(${MARGIN},${MARGIN})">${infoSvg}` +
+    `<g transform="translate(0,${infoH + GAP})">${tableSvg}</g>` +
+    `</g></svg>`;
+
+  return { svg, width, height };
+}
+
+/** SVG string of the snapshot for `kind`/`id` (exposed mainly for testing). null if the item does not exist. */
+function buildSnapshotSVG(kind, id) {
+  const doc = buildSnapshotDoc(kind, id);
+  return doc ? doc.svg : null;
+}
+
+/**
+ * Renders the snapshot to a PNG Blob: SVG -> <img> (via a data: URL, the
+ * safest route in Safari - object URLs and Blob-URL images can taint the
+ * canvas there) -> <canvas> -> `toBlob`. Rejects if the item is gone or the
+ * browser refuses to decode the SVG.
+ */
+async function buildSnapshotPNG(kind, id) {
+  const doc = buildSnapshotDoc(kind, id);
+  if (!doc) throw new Error(`Snapshot: ${kind} "${id}" not found.`);
+  const dataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(doc.svg);
+  const img = new Image();
+  await new Promise((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error('Could not render the snapshot image.'));
+    img.src = dataUrl;
+  });
+  // Render at 2x for crisper text, unless that would make an unreasonably large PNG.
+  const scale = doc.width * doc.height <= 1600 * 1600 ? 2 : 1;
+  const canvas = document.createElement('canvas');
+  canvas.width = doc.width * scale;
+  canvas.height = doc.height * scale;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.scale(scale, scale);
+  ctx.drawImage(img, 0, 0, doc.width, doc.height);
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('Could not create the PNG file.'))), 'image/png');
+  });
+}
+
+/**
+ * File name for a new snapshot: "_snapshot_YYYY-MM-DD.png", or with "_HHMM"
+ * appended when a same-day snapshot already exists (`existingNames`: an
+ * array or a Set of names already used by the item's attachments/snapshots).
+ */
+function snapshotFileName(existingNames) {
+  const used = existingNames instanceof Set ? existingNames : new Set(existingNames || []);
+  const base = `_snapshot_${dayToIso(todayDay())}.png`;
+  if (!used.has(base)) return base;
+  const d = new Date();
+  const hhmm = `${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`;
+  return `_snapshot_${dayToIso(todayDay())}_${hhmm}.png`;
+}
+</script>
+
+<!-- ======================================================================
+     7c. ATTACHMENTS (K5, mode C - files live only in a folder on disk)
+     Two ways of getting files onto disk, chosen once per session by feature
+     detection:
+       - "handle mode" (Chrome/Edge): window.showDirectoryPicker gives a
+         FileSystemDirectoryHandle for the project folder, kept in memory
+         only (never saved). Files are copied there directly.
+       - "manual mode" (Safari/Firefox): there is no way to write to an
+         arbitrary folder, so the app only records the intended path and
+         asks the user to move the file(s) there by hand.
+     Either way, only the small {name, path, added} entry (and the once-only
+     "folder"/"attachRoot") is ever written into the project - never file
+     contents - so a normal JSON export/import round-trips attachments
+     exactly like any other field.
+     ====================================================================== -->
+<script id="attachments">
+'use strict';
+
+/** In-memory-only attachment state (never saved: a fresh session always starts empty). */
+const attachState = {
+  dirHandle: null,        // FileSystemDirectoryHandle of the project folder, handle mode only
+  missing: new Set(),     // `${itemId}::${path}` of attachments the last "Open" could not find on disk
+};
+
+/** True when this browser can read/write real files on disk (Chrome/Edge); false = manual mode (Safari/Firefox). */
+function hasFileSystemAccess() { return typeof window.showDirectoryPicker === 'function'; }
+
+/**
+ * Turns free text into a safe folder/file-name component (format 1.2 "safe()"):
+ * the characters Windows/macOS forbid (and control characters) become "_",
+ * leading/trailing spaces and dots are trimmed, the result is capped at 80
+ * characters, and a Windows-reserved device name (CON, PRN, AUX, NUL,
+ * COM1-9, LPT1-9 - even with an extension, e.g. "con.txt") gets "_"
+ * appended to its base name. Never returns an empty string.
+ */
+function safeName(s) {
+  let out = String(s || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_');
+  out = out.replace(/^[\s.]+|[\s.]+$/g, '').slice(0, 80);
+  out = out.replace(/^[\s.]+|[\s.]+$/g, '');
+  if (!out) return 'item';
+  const dot = out.indexOf('.');
+  const base = dot >= 0 ? out.slice(0, dot) : out;
+  if (RESERVED_WIN_NAMES.test(base)) out = dot >= 0 ? `${base}_${out.slice(dot)}` : `${out}_`;
+  return out;
+}
+
+/** Pure: the project's attachRoot, or what it would be if not yet set (format 1.2). Never touches state. */
+function peekAttachRoot() {
+  return state.attachRoot || `${safeName(state.name)}_Attachments`;
+}
+
+/** True when some OTHER phase or task already has folder === "`rootVal`/`sub`". */
+function folderNameTaken(sub, rootVal) {
+  const full = `${rootVal}/${sub}`;
+  for (const p of state.phases) {
+    if (p.folder === full) return true;
+    for (const t of p.tasks) if (t.folder === full) return true;
+  }
+  return false;
+}
+
+/**
+ * Pure: the folder a task/phase already has, or the one it would get if
+ * assigned right now (format 1.2: the item's CURRENT number + " " + safe(name),
+ * unique among every phase and task's folder already in `state`). Never
+ * touches state, so it can be computed before an async picker/disk operation
+ * and safely recomputed later - if an undo removed a folder assignment and
+ * nothing else has taken its place, the same name comes out again. Returns
+ * null if the item no longer exists.
+ */
+function peekItemFolder(kind, id) {
+  const loc = kind === 'task' ? findTask(id) : findPhase(id);
+  if (!loc) return null;
+  const item = kind === 'task' ? loc.task : loc.phase;
+  if (item.folder) return item.folder;
+  const rootVal = peekAttachRoot();
+  const num = numbering();
+  const base = `${num.get(id)} ${safeName(item.name)}`;
+  let sub = base, n = 2;
+  while (folderNameTaken(sub, rootVal)) sub = `${base} (${n++})`;
+  return `${rootVal}/${sub}`;
+}
+
+/**
+ * Assigns the project's attachment root folder once, as its own undo step.
+ * A no-op (no commit) once it is already set. Used only by "Update snapshot"
+ * (which has no attachment-list commit of its own to fold this into) -
+ * "Add file..." instead uses `peekAttachRoot`/`peekItemFolder` and folds
+ * everything into ONE commit, so a whole "Add file..." action is exactly one
+ * undo step (the undo budget is only 10 steps).
+ */
+function ensureAttachRoot() {
+  if (state.attachRoot) return state.attachRoot;
+  const val = peekAttachRoot();
+  commit(() => { if (!state.attachRoot) state.attachRoot = val; });
+  return state.attachRoot || val;
+}
+
+/**
+ * Assigns a task's or phase's attachment subfolder once (never renamed
+ * afterwards even if the item is later renamed, renumbered or moved to
+ * another phase), as its own undo step. A no-op (no commit) once the item
+ * already has a folder. Used only by "Update snapshot" - see `ensureAttachRoot`.
+ * Returns the full path (attachRoot/subfolder), or null if the item no
+ * longer exists.
+ */
+function ensureItemFolder(kind, id) {
+  const loc = kind === 'task' ? findTask(id) : findPhase(id);
+  if (!loc) return null;
+  const item = kind === 'task' ? loc.task : loc.phase;
+  if (item.folder) return item.folder;
+  const folder = peekItemFolder(kind, id);
+  ensureAttachRoot();
+  commit(() => { if (!item.folder) item.folder = folder; });
+  return item.folder;
+}
+
+/** Appends " (2)", " (3)", ... before the extension until `name` is not in `existing` (a Set). */
+function uniqueFileName(name, existing) {
+  if (!existing.has(name)) return name;
+  const dot = name.lastIndexOf('.');
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  let n = 2, candidate;
+  do { candidate = `${base} (${n++})${ext}`; } while (existing.has(candidate));
+  return candidate;
+}
+
+/** URL-encodes a relative path segment by segment, so "#"/"?"/spaces in file names still work in an <a href>. */
+function encodeRelPath(path) {
+  return path.split('/').map(encodeURIComponent).join('/');
+}
+
+/** Offers a Blob as a file download (manual mode: snapshots and, indirectly, the user's own files never need this). */
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
+}
+
+/**
+ * Lets the user choose one or more files via the hidden <input type=file>
+ * (manual mode, or the handle-mode fallback when showOpenFilePicker is not
+ * available). Resolves to [] when the user cancels (relies on the 'cancel'
+ * event; browsers without it simply never resolve, same as Menu -> Open).
+ */
+function pickFilesViaInput() {
+  return new Promise((resolve) => {
+    const inp = $('#attachFileInput');
+    inp.value = '';
+    const done = (files) => { inp.removeEventListener('change', onChange); inp.removeEventListener('cancel', onCancel); resolve(files); };
+    const onChange = () => done(Array.from(inp.files || []));
+    const onCancel = () => done([]);
+    inp.addEventListener('change', onChange);
+    inp.addEventListener('cancel', onCancel);
+    inp.click();
+  });
+}
+
+/** `${itemId}::${path}` key used by the in-memory "missing file" flag. */
+function missingKey(id, path) { return `${id}::${path}`; }
+function isAttachmentMissing(id, path) { return attachState.missing.has(missingKey(id, path)); }
+function markAttachmentMissing(id, path) { attachState.missing.add(missingKey(id, path)); }
+function clearAttachmentMissing(id, path) { attachState.missing.delete(missingKey(id, path)); }
+
+/**
+ * Confirms (queryPermission) or asks for (requestPermission) read/write
+ * permission on a directory handle. Re-checked before every disk access, not
+ * just once per session, in case the browser revoked it in the meantime. A
+ * handle without these methods (e.g. a test double) is treated as granted.
+ */
+async function verifyWritePermission(dh) {
+  try {
+    const opts = { mode: 'readwrite' };
+    if (typeof dh.queryPermission === 'function' && (await dh.queryPermission(opts)) === 'granted') return true;
+    if (typeof dh.requestPermission === 'function') return (await dh.requestPermission(opts)) === 'granted';
+    return true;
+  } catch (e) { return false; }
+}
+
+/**
+ * Returns the in-memory project-folder handle (handle mode), asking the user
+ * to pick it the first time this session (or again if permission was lost).
+ * null if the user declines/cancels or the browser refuses.
+ */
+async function ensureDirHandle() {
+  if (attachState.dirHandle && await verifyWritePermission(attachState.dirHandle)) return attachState.dirHandle;
+  attachState.dirHandle = null;
+  const ok = await confirmBox('Select project folder',
+    '<p>Select the folder that contains your project JSON file (the same folder as this gantt-planner.html).</p>' +
+    '<p class="hint">The app remembers this only for the current browser tab and creates a subfolder there for attached files. Nothing is uploaded anywhere.</p>',
+    'Choose folder…');
+  if (!ok) return null;
+  let dh;
+  try { dh = await window.showDirectoryPicker({ mode: 'readwrite' }); }
+  catch (e) {
+    if (e && e.name === 'AbortError') return null;
+    await showMessage('Could not open the folder', `<p>${esc(e.message || String(e))}</p>`);
+    return null;
+  }
+  if (!(await verifyWritePermission(dh))) {
+    await showMessage('Permission needed', '<p>Without write permission for this folder, files cannot be added, updated or opened here.</p>');
+    return null;
+  }
+  attachState.dirHandle = dh;
+  return dh;
+}
+
+/** Walks/creates `folderPath` (e.g. "Project_Attachments/1.2 FAT") under `rootHandle`, one segment at a time. */
+async function getOrCreateSubdir(rootHandle, folderPath) {
+  let dh = rootHandle;
+  for (const seg of folderPath.split('/').filter(Boolean)) dh = await dh.getDirectoryHandle(seg, { create: true });
+  return dh;
+}
+
+/** Walks (never creates) to the file handle for a relative path under `rootHandle`. Throws NotFoundError if missing. */
+async function getFileHandleForPath(rootHandle, path) {
+  const segs = path.split('/').filter(Boolean);
+  const fname = segs.pop();
+  let dh = rootHandle;
+  for (const seg of segs) dh = await dh.getDirectoryHandle(seg);
+  return dh.getFileHandle(fname);
+}
+
+/** Writes `data` (a File or Blob) into `dirHandle` as `name`, overwriting any existing file of that name. */
+async function writeFileToDir(dirHandle, name, data) {
+  const fh = await dirHandle.getFileHandle(name, { create: true });
+  const w = await fh.createWritable();
+  await w.write(data);
+  await w.close();
+}
+
+/** The set of file names already present directly inside `dirHandle`. */
+async function listDirNames(dirHandle) {
+  const names = new Set();
+  if (dirHandle && typeof dirHandle.values === 'function') {
+    for await (const h of dirHandle.values()) names.add(h.name);
+  } else if (dirHandle && typeof dirHandle.entries === 'function') {
+    for await (const [n] of dirHandle.entries()) names.add(n);
+  }
+  return names;
+}
+
+/**
+ * "Add file..." in handle mode: pick file(s), create the item's folder if it
+ * does not exist yet (writing the first snapshot into it), copy every file
+ * (renaming on a name collision), then record them all as ONE undo step.
+ * Cancelling the picker does nothing (AbortError is swallowed).
+ */
+async function attachAddFilesHandle(kind, id) {
+  const dh = await ensureDirHandle();
+  if (!dh) return;
+  let files;
+  try {
+    if (typeof window.showOpenFilePicker === 'function') {
+      const handles = await window.showOpenFilePicker({ multiple: true });
+      files = await Promise.all(handles.map((h) => h.getFile()));
+    } else {
+      files = await pickFilesViaInput();
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;
+    await showMessage('Could not open the file picker', `<p>${esc(e.message || String(e))}</p>`);
+    return;
+  }
+  if (!files || !files.length) return;
+  const loc = kind === 'task' ? findTask(id) : findPhase(id);
+  if (!loc) return;
+  const item = kind === 'task' ? loc.task : loc.phase;
+  const wasNew = !item.folder;
+  // Pure computation only, so cancelling anything from here on commits nothing.
+  const folderPath = peekItemFolder(kind, id);
+  if (!folderPath) return;
+  let subDir;
+  try { subDir = await getOrCreateSubdir(dh, folderPath); }
+  catch (e) { await showMessage('Could not create the folder', `<p>${esc(e.message || String(e))}</p>`); return; }
+  if (wasNew) {
+    try {
+      const blob = await buildSnapshotPNG(kind, id);
+      await writeFileToDir(subDir, snapshotFileName([]), blob);
+    } catch (e) { /* the snapshot is a courtesy extra - do not block adding the files over it */ }
+  }
+  let existing;
+  try { existing = await listDirNames(subDir); }
+  catch (e) { await showMessage('Could not read the folder', `<p>${esc(e.message || String(e))}</p>`); return; }
+  const added = [];
+  for (const file of files) {
+    const finalName = uniqueFileName(file.name, existing);
+    existing.add(finalName);
+    try { await writeFileToDir(subDir, finalName, file); }
+    catch (e) { await showMessage('Could not save a file', `<p><b>${esc(file.name)}</b>: ${esc(e.message || String(e))}</p>`); continue; }
+    added.push({ name: finalName, path: `${folderPath}/${finalName}`, added: fileDate() });
+  }
+  // ONE commit for the whole action (attachRoot + folder, both only if still unset, + the new
+  // entries), so "Add file..." is exactly one undo step regardless of how many files were picked.
+  // Also commits when nothing was added but the folder is genuinely new (the snapshot now lives on
+  // disk in it), so the recorded folder always matches what is actually there.
+  if (added.length || wasNew) {
+    const rootVal = folderPath.slice(0, folderPath.indexOf('/'));
+    commit(() => {
+      const cur = kind === 'task' ? findTask(id) : findPhase(id);
+      if (!cur) return false;
+      const it = kind === 'task' ? cur.task : cur.phase;
+      if (!state.attachRoot) state.attachRoot = rootVal;
+      if (!it.folder) it.folder = folderPath;
+      it.attachments.push(...added);
+    });
+  }
+}
+
+/**
+ * "Add file..." in manual mode: the browser cannot write outside of a
+ * download, so only the file NAME is used (the picked file's content is
+ * never read). The entry is recorded with its target path, the snapshot (if
+ * the folder is new) is downloaded, and a dialog lists what the user must
+ * move by hand.
+ */
+async function attachAddFilesManual(kind, id) {
+  const files = await pickFilesViaInput();
+  if (!files || !files.length) return;
+  const loc = kind === 'task' ? findTask(id) : findPhase(id);
+  if (!loc) return;
+  const item = kind === 'task' ? loc.task : loc.phase;
+  const wasNew = !item.folder;
+  // Pure computation only, so cancelling the file picker (handled above) commits nothing.
+  const folderPath = peekItemFolder(kind, id);
+  if (!folderPath) return;
+  let snapName = null;
+  if (wasNew) {
+    try {
+      snapName = snapshotFileName([]);
+      downloadBlob(await buildSnapshotPNG(kind, id), snapName);
+    } catch (e) { snapName = null; }
+  }
+  const existing = new Set((item.attachments || []).map((a) => a.name));
+  const added = [];
+  for (const file of files) {
+    const finalName = uniqueFileName(file.name, existing);
+    existing.add(finalName);
+    added.push({ name: finalName, path: `${folderPath}/${finalName}`, added: fileDate() });
+  }
+  // ONE commit for the whole action - see attachAddFilesHandle.
+  const rootVal = folderPath.slice(0, folderPath.indexOf('/'));
+  commit(() => {
+    const cur = kind === 'task' ? findTask(id) : findPhase(id);
+    if (!cur) return false;
+    const it = kind === 'task' ? cur.task : cur.phase;
+    if (!state.attachRoot) state.attachRoot = rootVal;
+    if (!it.folder) it.folder = folderPath;
+    it.attachments.push(...added);
+  });
+  await showMessage('Move these files',
+    `<p>Move these files into: <b>${esc(folderPath)}/</b> (next to your project JSON file and gantt-planner.html):</p>` +
+    `<ul>${added.map((a) => `<li>${esc(a.name)}</li>`).join('')}${snapName ? `<li>${esc(snapName)} <span class="hint">(snapshot)</span></li>` : ''}</ul>`);
+}
+
+/** "Update snapshot": builds a new PNG and either writes it (handle mode) or downloads it (manual mode). Never adds a list entry. */
+async function attachUpdateSnapshot(kind, id) {
+  const folderPath = ensureItemFolder(kind, id);
+  if (!folderPath) return;
+  if (hasFileSystemAccess()) {
+    const dh = await ensureDirHandle();
+    if (!dh) return;
+    let subDir;
+    try { subDir = await getOrCreateSubdir(dh, folderPath); }
+    catch (e) { await showMessage('Could not create the folder', `<p>${esc(e.message || String(e))}</p>`); return; }
+    let existing;
+    try { existing = await listDirNames(subDir); }
+    catch (e) { await showMessage('Could not read the folder', `<p>${esc(e.message || String(e))}</p>`); return; }
+    const name = snapshotFileName(existing);
+    let blob;
+    try { blob = await buildSnapshotPNG(kind, id); }
+    catch (e) { await showMessage('Could not build the snapshot', `<p>${esc(e.message || String(e))}</p>`); return; }
+    try { await writeFileToDir(subDir, name, blob); }
+    catch (e) { await showMessage('Could not save the snapshot', `<p>${esc(e.message || String(e))}</p>`); return; }
+    await showMessage('Snapshot updated', `<p>Saved as <b>${esc(name)}</b> in <b>${esc(folderPath)}/</b>.</p>`);
+  } else {
+    const name = snapshotFileName([]);
+    let blob;
+    try { blob = await buildSnapshotPNG(kind, id); }
+    catch (e) { await showMessage('Could not build the snapshot', `<p>${esc(e.message || String(e))}</p>`); return; }
+    downloadBlob(blob, name);
+    await showMessage('Move this file',
+      `<p>Move this file into: <b>${esc(folderPath)}/</b> (next to your project JSON file and gantt-planner.html):</p><ul><li>${esc(name)}</li></ul>`);
+  }
+}
+
+/** "Open" in handle mode: read the file through the handle and open it as a Blob URL in a new tab. Flags it "missing" on NotFoundError. */
+async function attachOpen(id, att) {
+  const dh = await ensureDirHandle();
+  if (!dh) return;
+  try {
+    const fh = await getFileHandleForPath(dh, att.path);
+    const file = await fh.getFile();
+    const url = URL.createObjectURL(file);
+    window.open(url, '_blank', 'noopener');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    clearAttachmentMissing(id, att.path);
+  } catch (e) {
+    if (e && e.name === 'NotFoundError') markAttachmentMissing(id, att.path);
+    else await showMessage('Could not open the file', `<p>${esc(e.message || String(e))}</p>`);
+  }
+}
+
+/** "Re-select..." (handle mode, missing file only): copies a freshly chosen file to the attachment's original path. */
+async function attachReselect(id, att) {
+  const dh = await ensureDirHandle();
+  if (!dh) return;
+  let file;
+  try {
+    if (typeof window.showOpenFilePicker === 'function') {
+      const [h] = await window.showOpenFilePicker({ multiple: false });
+      file = await h.getFile();
+    } else {
+      file = (await pickFilesViaInput())[0];
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;
+    await showMessage('Could not open the file picker', `<p>${esc(e.message || String(e))}</p>`);
+    return;
+  }
+  if (!file) return;
+  try {
+    const segs = att.path.split('/').filter(Boolean);
+    const fname = segs.pop();
+    let dh2 = dh;
+    for (const seg of segs) dh2 = await dh2.getDirectoryHandle(seg, { create: true });
+    await writeFileToDir(dh2, fname, file);
+    clearAttachmentMissing(id, att.path);
+    await showMessage('File restored', `<p>The file was saved as <b>${esc(att.path)}</b>.</p>`);
+  } catch (e) { await showMessage('Could not save the file', `<p>${esc(e.message || String(e))}</p>`); }
+}
+
+/** One row of the Attachments section: name, added date, Open (button or plain link) / Re-select, Remove. */
+function attachRowHTML(id, att, idx) {
+  const missing = isAttachmentMissing(id, att.path);
+  let openHTML;
+  if (missing) openHTML = `<button type="button" data-atc-act="reselect" data-atc-i="${idx}">Re-select…</button>`;
+  else if (hasFileSystemAccess()) openHTML = `<button type="button" data-atc-act="open" data-atc-i="${idx}">Open</button>`;
+  else openHTML = `<a href="${encodeRelPath(att.path)}" target="_blank" rel="noopener">Open</a>`;
+  return `<div class="atcrow${missing ? ' atc-missing' : ''}" data-i="${idx}">
+    <span class="atc-name" title="${esc(att.path)}">${esc(att.name)}</span>
+    ${missing ? '<span class="atc-flag">Missing</span>' : ''}
+    <span class="atc-date">${esc(dayToDisp(isoToDay(att.added)))}</span>
+    <span class="atc-acts">${openHTML}<button type="button" data-atc-act="remove" data-atc-i="${idx}" title="Remove from the list (the file stays on disk)">Remove</button></span>
+  </div>`;
+}
+
+/** Static markup of the Attachments fieldset (K5); the row list and note are filled in by `wireAttachSection`. */
+function attachSectionHTML() {
+  return `<fieldset class="itemsec" id="atc-sec"><legend>Attachments</legend>
+    <div id="atc-rows"></div>
+    <div class="atc-btns">
+      <button type="button" id="atc-add">+ Add file…</button>
+      <button type="button" id="atc-snap">Update snapshot</button>
+    </div>
+    <p class="hint" id="atc-note"></p>
+  </fieldset>`;
+}
+
+/**
+ * Wires a dialog's Attachments section (K5). Unlike the Links section, this
+ * works DIRECTLY on the live task/phase (not a draft copy): every action
+ * (add, update snapshot, open, re-select, remove) writes to disk and/or
+ * commits immediately, so the dialog's own Cancel/Save never has anything
+ * of its own to lose or overwrite here.
+ */
+function wireAttachSection(d, kind, id) {
+  const rowsEl = $('#atc-rows', d), noteEl = $('#atc-note', d);
+  const addBtn = $('#atc-add', d), snapBtn = $('#atc-snap', d);
+  function currentItem() {
+    const loc = kind === 'task' ? findTask(id) : findPhase(id);
+    return loc ? (kind === 'task' ? loc.task : loc.phase) : null;
+  }
+  function renderRows() {
+    const item = currentItem();
+    if (!item) return;
+    const atts = item.attachments || [];
+    rowsEl.innerHTML = atts.length ? atts.map((a, i) => attachRowHTML(id, a, i)).join('')
+      : '<p class="hint" style="margin:2px 0 8px">No attachments yet.</p>';
+    noteEl.textContent = item.folder
+      ? `Files are kept in: ${item.folder}/`
+      : (hasFileSystemAccess()
+        ? 'The first file you add asks you to pick your project folder once, then creates a subfolder there.'
+        : 'The first file you add asks you to move it into a subfolder next to this HTML file.');
+  }
+  let busy = false;
+  /** Runs `fn`, disabling the section's buttons meanwhile so a slow picker cannot be triggered twice. */
+  async function guarded(fn) {
+    if (busy) return;
+    busy = true; addBtn.disabled = true; snapBtn.disabled = true;
+    try { await fn(); } finally { busy = false; addBtn.disabled = false; snapBtn.disabled = false; renderRows(); }
+  }
+  addBtn.addEventListener('click', () => guarded(() => hasFileSystemAccess() ? attachAddFilesHandle(kind, id) : attachAddFilesManual(kind, id)));
+  snapBtn.addEventListener('click', () => guarded(() => attachUpdateSnapshot(kind, id)));
+  rowsEl.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-atc-act]');
+    if (!b) return;
+    e.preventDefault();
+    const act = b.dataset.atcAct, i = Number(b.dataset.atcI);
+    guarded(async () => {
+      const item = currentItem();
+      const att = item && (item.attachments || [])[i];
+      if (!att) return;
+      if (act === 'open') await attachOpen(id, att);
+      else if (act === 'reselect') await attachReselect(id, att);
+      else if (act === 'remove') {
+        const ok = await confirmBox('Remove from list?',
+          `<p>Remove <b>${esc(att.name)}</b> from the attachment list?</p><p class="hint">The file stays on disk – only this entry is removed.</p>`,
+          'Remove', true);
+        if (ok) {
+          commit(() => {
+            const cur = currentItem();
+            if (!cur) return false;
+            const j = (cur.attachments || []).findIndex((x) => x.path === att.path && x.name === att.name);
+            if (j < 0) return false;
+            cur.attachments.splice(j, 1);
+          });
+        }
+      }
+    });
+  });
+  renderRows();
+}
+</script>
+
+<!-- ======================================================================
      8. UI EVENTS: toolbar, table editing, keyboard, start-up
      ====================================================================== -->
 <script id="ui-events">
@@ -2351,6 +3826,32 @@ function scrollToDay(n, smooth) {
   const margin = (L.g.zoom === 'week' ? 3 : 10) * L.g.dayW;
   const left = Math.max(0, L.leftW + L.g.x(n) - L.stickyW - margin);
   $('#scroller').scrollTo({ left, behavior: smooth ? 'smooth' : 'auto' });
+}
+
+/**
+ * Makes sure a task/phase's row can actually be shown before scrolling to it
+ * (K3 "walk the chain"): expands its collapsed phase and clears an active
+ * search filter if either would otherwise hide the row. Decision: do this
+ * silently (no message) rather than opening the dialog on a hidden row.
+ */
+function ensureVisible(id) {
+  const tl = findTask(id);
+  const phaseId = tl ? tl.phase.id : (findPhase(id) ? id : null);
+  if (phaseId) { const loc = findPhase(phaseId); if (loc && loc.phase.collapsed) { loc.phase.collapsed = false; dirty = true; } }
+  if (ui.filter.trim()) { ui.filter = ''; const s = $('#search'); if (s) s.value = ''; }
+}
+
+/** Selects a task/phase, makes it visible if needed, and scrolls table + timeline to it (K3 "walk the chain"). */
+function walkTo(id) {
+  ensureVisible(id);
+  ui.selected = id;
+  render();
+  const tl = findTask(id), pl = findPhase(id);
+  const startDay = tl ? isoToDay(tl.task.start) : (pl ? (phaseSummary(pl.phase)?.start ?? todayDay()) : todayDay());
+  scrollToDay(startDay, true);
+  const row = $(`#sheet .row[data-row="${CSS.escape(id)}"]`);
+  if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  openWhatNext(id);
 }
 
 /** Switches week/month zoom and keeps the same date at the left edge of the visible timeline. */
@@ -2424,7 +3925,12 @@ function deletePhase(id) {
   });
 }
 
-/** Copies a task right below the original: same data, but WITHOUT links (decision). */
+/**
+ * Copies a task right below the original: same data, including its web
+ * links, but WITHOUT dependency links, attachments or its folder (decision:
+ * the copy is a new item and gets its own folder the first time a file is
+ * added to it, see K5).
+ */
 function duplicateTask(id) {
   let copyId = null;
   commit(() => {
@@ -2434,6 +3940,8 @@ function duplicateTask(id) {
     c.id = newId('t');
     c.name = `${loc.task.name} (copy)`;
     c.deps = [];
+    c.attachments = [];
+    delete c.folder;
     loc.phase.tasks.splice(loc.index + 1, 0, c);
     ui.selected = c.id;
     copyId = c.id;
@@ -2654,10 +4162,25 @@ function init() {
   // ---- toolbar ----
   $('#bAddPhase').addEventListener('click', addPhase);
   $('#bAddTask').addEventListener('click', addTask);
+  $('#bWhatNext').addEventListener('click', () => openWhatNext());
   $('#bUndo').addEventListener('click', undo);
   $('#bRedo').addEventListener('click', redo);
   $('#zoom').addEventListener('change', (e) => setZoom(e.target.value));
-  $('#bToday').addEventListener('click', () => scrollToDay(todayDay(), true));
+  $('#bToday').addEventListener('click', () => {
+    applyTodayBlink = true;  // Flag to apply blink on the next render (which scrollToDay may trigger).
+    scrollToDay(todayDay(), true);
+    // If no render was triggered, apply blink immediately.
+    if (!renderQueued) {
+      requestAnimationFrame(() => {
+        const line = $('svg.tl .today-line');
+        if (line) {
+          line.classList.remove('blink');
+          void line.offsetWidth;  // Force reflow
+          line.classList.add('blink');
+        }
+      });
+    }
+  });
   $('#search').addEventListener('input', (e) => { ui.filter = e.target.value; requestRender(); });
   const pn = $('#projName');
   pn.addEventListener('change', () => commit(() => { state.name = pn.value.trim() || 'Untitled project'; }));
@@ -2720,6 +4243,10 @@ function init() {
     if (suppressClick) { suppressClick = false; return; }       // the click that ends a drag
     const lk = e.target.closest('[data-link]');
     if (lk) { const [succ, pred] = lk.dataset.link.split('|'); openLinkDialog(succ, pred); return; }
+    const li = e.target.closest('[data-links]');
+    if (li) { openItemLinks(li.dataset.links); return; }         // 🔗 icon: open link(s), never selects/changes the row
+    const ai = e.target.closest('[data-attach]');
+    if (ai) { openItemAttachments(ai.dataset.attach); return; }  // 📎 icon: open the dialog's Attachments section
     const tg = e.target.closest('[data-toggle]');
     if (tg) { selectRow(tg.dataset.toggle); toggleCollapse(tg.dataset.toggle); return; }
     const mv = e.target.closest('[data-move]');
